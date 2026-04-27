@@ -18,6 +18,9 @@ dependencies = [
     # Cache + pub/sub
     "redis>=5.0.0",
 
+    # WebSocket client (upstream collectors)
+    "websockets>=12.0",
+
     # HTTP client
     "httpx>=0.25.0",
 
@@ -36,6 +39,7 @@ dependencies = [
     "tushare>=1.4.0",
     "tiingo>=0.5.0",
     "finnhub-python>=2.4.19",
+    "polygon-api-client>=1.13.0",
     "pandas>=2.0.0",
 
     # Date handling

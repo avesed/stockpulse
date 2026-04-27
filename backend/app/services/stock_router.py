@@ -45,11 +45,13 @@ class StockRouter:
         akshare: DataProvider,
         tushare: Optional[DataProvider] = None,
         tiingo: Optional[DataProvider] = None,
+        polygon: Optional[DataProvider] = None,
     ):
         self._yfinance = yfinance
         self._akshare = akshare
         self._tushare = tushare
         self._tiingo = tiingo
+        self._polygon = polygon
 
         # Build routing table: market str -> list of providers (priority order)
         tushare_list = (
@@ -58,9 +60,12 @@ class StockRouter:
         tiingo_list = (
             [tiingo] if tiingo and tiingo.is_available() else []
         )
+        polygon_list = (
+            [polygon] if polygon and polygon.is_available() else []
+        )
 
         self._routing: Dict[str, List[DataProvider]] = {
-            US: [yfinance] + tiingo_list,
+            US: [yfinance] + polygon_list + tiingo_list,
             METAL: [yfinance],
             HK: [akshare, yfinance],
             SH: [akshare] + tushare_list + [yfinance],
@@ -249,6 +254,11 @@ class StockRouter:
         """Direct access to tiingo provider (may be None)."""
         return self._tiingo
 
+    @property
+    def polygon(self) -> Optional[DataProvider]:
+        """Direct access to polygon provider (may be None)."""
+        return self._polygon
+
     # === Convenience Methods (combining data from multiple providers) ===
 
     async def get_market_context(self) -> Dict[str, Any]:
@@ -418,6 +428,7 @@ async def get_stock_router() -> StockRouter:
                 from app.providers.akshare_provider import AKShareProvider
                 from app.providers.tushare_provider import TushareProvider
                 from app.providers.tiingo_provider import TiingoProvider
+                from app.providers.polygon_provider import PolygonProvider
 
                 yfinance = YFinanceProvider()
                 akshare = AKShareProvider()
@@ -431,14 +442,23 @@ async def get_stock_router() -> StockRouter:
                     if TiingoProvider.is_available()
                     else None
                 )
+                polygon = (
+                    PolygonProvider()
+                    if PolygonProvider.is_available()
+                    else None
+                )
 
-                _router = StockRouter(yfinance, akshare, tushare, tiingo)
+                _router = StockRouter(
+                    yfinance, akshare, tushare, tiingo, polygon
+                )
 
                 providers = ["yfinance", "akshare"]
                 if tushare:
                     providers.append("tushare")
                 if tiingo:
                     providers.append("tiingo")
+                if polygon:
+                    providers.append("polygon")
                 logger.info(
                     "StockRouter initialized: %s", ", ".join(providers)
                 )

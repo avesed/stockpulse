@@ -527,6 +527,12 @@ async def _update_progress(
         }
         key = _PROGRESS_KEY_TEMPLATE.format(market=market)
         await r.setex(key, _PROGRESS_TTL, json.dumps(progress))
+        # Publish for WebSocket fanout
+        from app.ws.redis_fanout import publish_collection_progress
+        from app.ws.protocol import make_collection_progress
+        await publish_collection_progress(
+            make_collection_progress(market, symbols_done, symbols_total, new_bars, pct)
+        )
     except Exception:
         pass  # Non-critical
 

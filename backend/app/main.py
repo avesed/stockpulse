@@ -70,10 +70,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.core.scheduler import start_scheduler, stop_scheduler
     await start_scheduler()
 
+    # Start WebSocket fanout subscriber (every worker)
+    from app.ws.manager import get_manager
+    from app.ws.redis_fanout import start_fanout_subscriber, stop_fanout_subscriber
+    ws_manager = get_manager()
+    start_fanout_subscriber(ws_manager)
+
     yield
 
     logger.info("Shutting down StockPulse...")
 
+    from app.ws.upstream.collector_service import stop_all_collectors
+    await stop_all_collectors()
+    await stop_fanout_subscriber()
     await stop_scheduler()
     await stop_watchdog()
     await stop_subscriber()
@@ -136,3 +145,7 @@ app.include_router(analysis_router)
 app.include_router(reference_router)
 app.include_router(internal_router)
 app.include_router(collection_router)
+
+# WebSocket router
+from app.ws.endpoints import router as ws_router  # noqa: E402
+app.include_router(ws_router)

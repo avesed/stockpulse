@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     FINNHUB_API_KEY: str = ""
     TUSHARE_TOKEN: str = ""
     TIINGO_API_KEY: str = ""
+    POLYGON_API_KEY: str = ""
 
     # Server
     HOST: str = "0.0.0.0"
@@ -53,6 +54,17 @@ class Settings(BaseSettings):
     EXECUTOR_MAX_WORKERS: int = 20       # Frontend API requests
     EXECUTOR_BACKGROUND_WORKERS: int = 10  # Daily bar + stock list collection
     EXECUTOR_PROFILE_WORKERS: int = 5    # Stock profile collection
+
+    # WebSocket
+    WS_HEARTBEAT_INTERVAL: int = 30          # seconds between server pings
+    WS_HEARTBEAT_TIMEOUT: int = 10           # seconds to wait for pong
+    WS_MAX_CONNECTIONS_PER_CONSUMER: int = 5  # per API consumer
+    WS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 50  # symbols per WS session
+    WS_UPSTREAM_RECONNECT_MAX_DELAY: int = 30   # max backoff seconds
+
+    # Upstream WebSocket URLs
+    FINNHUB_WS_URL: str = "wss://ws.finnhub.io"
+    POLYGON_WS_URL: str = "wss://socket.polygon.io/stocks"
 
     @property
     def cors_origin_list(self) -> list[str]:

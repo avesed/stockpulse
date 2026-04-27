@@ -31,6 +31,7 @@ _ENV_FALLBACK = {
     "finnhub": "FINNHUB_API_KEY",
     "tiingo": "TIINGO_API_KEY",
     "tushare": "TUSHARE_TOKEN",
+    "polygon": "POLYGON_API_KEY",
 }
 
 

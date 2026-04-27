@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Play, RefreshCw, Unlock, Loader2, List } from 'lucide-react'
+import { Play, RefreshCw, Unlock, Loader2, List, Wifi, WifiOff } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -18,10 +18,11 @@ import {
 } from '@/api/admin'
 import { getErrorMessage } from '@/api/client'
 import { showToast, showErrorToast } from '@/stores/toastStore'
+import { useCollectionProgressWs } from '@/hooks/useCollectionProgress'
 
 const MARKETS = ['cn', 'hk', 'us', 'metal'] as const
 
-function MarketCard({ market }: { market: string }) {
+function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: boolean }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -29,6 +30,8 @@ function MarketCard({ market }: { market: string }) {
     queryKey: ['collection-progress', market],
     queryFn: () => getCollectionProgress(market),
     refetchInterval: (query) => {
+      // Disable polling when WebSocket is delivering updates
+      if (isWsConnected) return false
       const data = query.state.data
       return data?.taskRunning ? 2000 : false
     },
@@ -256,15 +259,31 @@ function SchedulePanel() {
 
 export default function CollectionPage() {
   const { t } = useTranslation()
+  const { isWsConnected } = useCollectionProgressWs(MARKETS)
 
   return (
     <div className="space-y-6">
-      <h2 className="text-3xl font-bold tracking-tight">{t('collection.title')}</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-3xl font-bold tracking-tight">{t('collection.title')}</h2>
+        <Badge
+          variant="outline"
+          className={isWsConnected
+            ? 'text-green-600 border-green-200'
+            : 'text-muted-foreground'
+          }
+        >
+          {isWsConnected ? (
+            <><Wifi className="mr-1 h-3 w-3" /> Live</>
+          ) : (
+            <><WifiOff className="mr-1 h-3 w-3" /> Polling</>
+          )}
+        </Badge>
+      </div>
 
       {/* Market cards */}
       <div className="grid gap-4 md:grid-cols-2">
         {MARKETS.map((market) => (
-          <MarketCard key={market} market={market} />
+          <MarketCard key={market} market={market} isWsConnected={isWsConnected} />
         ))}
       </div>
 
