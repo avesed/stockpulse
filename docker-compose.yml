@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: stockpulse
+      POSTGRES_PASSWORD: stockpulse
+      POSTGRES_DB: stockpulse
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    mem_limit: 2g
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8010:80"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://stockpulse:stockpulse@postgres:5432/stockpulse
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: "*"
+      LOG_LEVEL: info
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: 4g
+
+  playwright-service:
+    image: mcr.microsoft.com/playwright:v1.40.0-focal
+    profiles: [playwright]
+    mem_limit: 1g
+
+volumes:
+  pgdata:
+  redisdata:

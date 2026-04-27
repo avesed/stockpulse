@@ -1,0 +1,53 @@
+# Development: postgres + redis + backend (hot reload)
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: stockpulse
+      POSTGRES_PASSWORD: stockpulse
+      POSTGRES_DB: stockpulse
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes
+    volumes:
+      - redisdata_dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8010:8010"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://stockpulse:stockpulse@postgres:5432/stockpulse
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+      LOG_LEVEL: info
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata_dev:
+  redisdata_dev:

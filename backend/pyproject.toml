@@ -1,0 +1,57 @@
+[project]
+name = "stockpulse"
+version = "1.0.0"
+description = "Universal stock data platform — market data collection, caching, and API"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+
+    # Config
+    "pydantic-settings>=2.0.0",
+
+    # Database — dual layer: asyncpg (bulk ops) + SQLAlchemy (ORM)
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+
+    # Cache + pub/sub
+    "redis>=5.0.0",
+
+    # HTTP client
+    "httpx>=0.25.0",
+
+    # Auth
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0.0,<4.2.0",
+
+    # Utility
+    "orjson>=3.9.0",
+    "msgpack>=1.0.0",
+
+    # Data providers
+    "yfinance>=0.2.31",
+    "akshare>=1.12.0",
+    "tushare>=1.4.0",
+    "tiingo>=0.5.0",
+    "finnhub-python>=2.4.19",
+    "pandas>=2.0.0",
+
+    # Date handling
+    "python-dateutil>=2.8.0",
+
+    # Chinese text processing (pinyin generation for stock list)
+    "pypinyin>=0.49.0",
+    "jieba>=0.42.0",
+
+    # Background scheduler (leader-elected cron jobs)
+    "apscheduler>=3.10.0,<4.0",
+
+    # Database migrations
+    "alembic>=1.12.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
