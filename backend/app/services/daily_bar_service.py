@@ -227,7 +227,7 @@ class DailyBarFetcher:
                     date_groups["1970-01-01"].append((symbol, None))
                     continue
 
-                if parsed >= today:
+                if parsed > today:
                     up_to_date.append(symbol)
                     results[symbol] = {"bars": [], "source": "yfinance"}
                     continue

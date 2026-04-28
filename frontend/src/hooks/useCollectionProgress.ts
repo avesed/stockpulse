@@ -31,15 +31,19 @@ export function useCollectionProgressWs(markets: readonly string[]) {
         updateCollectionProgress(event)
 
         // Also inject into React Query cache for backward compat
-        queryClient.setQueryData(['collection-progress', event.market], {
+        queryClient.setQueryData(['collection-progress', event.market], (old: unknown) => ({
           market: event.market,
           progress: {
             current: event.symbols_done,
             total: event.symbols_total,
             message: `${event.new_bars} new bars`,
+            elapsedSeconds: event.elapsed_seconds,
+            errorsCount: event.error_count,
           },
           taskRunning: event.percent < 100,
-        })
+          // Preserve lastRun from previous HTTP fetch
+          lastRun: (old as { lastRun?: unknown } | undefined)?.lastRun ?? null,
+        }))
       }
 
       if (event.type === 'collector_status') {

@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Play, RefreshCw, Unlock, Loader2, List, Wifi, WifiOff } from 'lucide-react'
+import {
+  Play, RefreshCw, Unlock, Loader2, List, Wifi, WifiOff,
+  Clock, AlertTriangle, ChevronDown, ChevronRight, Timer,
+} from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,12 +18,44 @@ import {
   unlockCollection,
   startProfileCollection,
   getSchedulerStatus,
+  getCollectionRuns,
+  getCollectionRunDetail,
 } from '@/api/admin'
 import { getErrorMessage } from '@/api/client'
 import { showToast, showErrorToast } from '@/stores/toastStore'
 import { useCollectionProgressWs } from '@/hooks/useCollectionProgress'
+import type { CollectionRun, CollectionRunDetail as RunDetail, LastRunSummary } from '@/types'
 
 const MARKETS = ['cn', 'hk', 'us', 'metal'] as const
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || seconds <= 0) return '-'
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  if (m === 0) return `${s}s`
+  return `${m}m ${s}s`
+}
+
+function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return '-'
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000
+  if (diff < 60) return `${Math.round(diff)}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString()
+}
+
+// ---------------------------------------------------------------------------
+// MarketCard
+// ---------------------------------------------------------------------------
 
 function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: boolean }) {
   const { t } = useTranslation()
@@ -30,7 +65,6 @@ function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: 
     queryKey: ['collection-progress', market],
     queryFn: () => getCollectionProgress(market),
     refetchInterval: (query) => {
-      // Disable polling when WebSocket is delivering updates
       if (isWsConnected) return false
       const data = query.state.data
       return data?.taskRunning ? 2000 : false
@@ -70,6 +104,10 @@ function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: 
     ? Math.round(((progressData.current ?? 0) / (progressData.total ?? 1)) * 100)
     : 0
 
+  // Last run: from progress response or top-level
+  const lastRun: LastRunSummary | null | undefined =
+    progressData?.lastRun ?? progress?.lastRun
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -89,6 +127,27 @@ function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: 
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>{progressData.message ?? ''}</span>
               <span>{progressData.current ?? 0}/{progressData.total ?? 0} ({pct}%)</span>
+            </div>
+            {/* Enhanced: elapsed, errors, ETA */}
+            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+              {progressData.elapsedSeconds != null && (
+                <span className="flex items-center gap-1">
+                  <Timer className="h-3 w-3" />
+                  {formatDuration(progressData.elapsedSeconds)}
+                </span>
+              )}
+              {(progressData.errorsCount ?? 0) > 0 && (
+                <span className="flex items-center gap-1 text-red-500">
+                  <AlertTriangle className="h-3 w-3" />
+                  {progressData.errorsCount} {t('collection.errors')}
+                </span>
+              )}
+              {progressData.estimatedRemaining != null && progressData.estimatedRemaining > 0 && (
+                <span className="flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  {t('collection.remaining', { time: formatDuration(progressData.estimatedRemaining) })}
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -125,10 +184,36 @@ function MarketCard({ market, isWsConnected }: { market: string; isWsConnected: 
             {t('collection.unlock')}
           </Button>
         </div>
+
+        {/* Last run summary */}
+        {!isRunning && lastRun && lastRun.finishedAt && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground pt-1 border-t">
+            <span>{t('collection.lastRun')}:</span>
+            <span>{formatRelativeTime(lastRun.finishedAt)}</span>
+            <span className="text-foreground/50">|</span>
+            <span>{formatNumber(lastRun.newBars)} {t('collection.barsInserted')}</span>
+            {lastRun.errorCount > 0 && (
+              <>
+                <span className="text-foreground/50">|</span>
+                <span className="text-red-500">{lastRun.errorCount} {t('collection.errors')}</span>
+              </>
+            )}
+            {lastRun.durationSeconds != null && (
+              <>
+                <span className="text-foreground/50">|</span>
+                <span>{formatDuration(lastRun.durationSeconds)}</span>
+              </>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
 }
+
+// ---------------------------------------------------------------------------
+// StockListPanel
+// ---------------------------------------------------------------------------
 
 function StockListPanel() {
   const { t } = useTranslation()
@@ -184,6 +269,214 @@ function StockListPanel() {
     </Card>
   )
 }
+
+// ---------------------------------------------------------------------------
+// CollectionHistoryPanel
+// ---------------------------------------------------------------------------
+
+function RunStatusBadge({ status }: { status: string }) {
+  const { t } = useTranslation()
+  switch (status) {
+    case 'completed':
+      return <Badge className="bg-green-500/10 text-green-600 border-green-200 text-xs">{t('collection.completed')}</Badge>
+    case 'failed':
+      return <Badge className="bg-red-500/10 text-red-600 border-red-200 text-xs">{t('collection.failed')}</Badge>
+    case 'running':
+      return <Badge className="bg-blue-500/10 text-blue-600 border-blue-200 text-xs">{t('collection.running')}</Badge>
+    default:
+      return <Badge variant="secondary" className="text-xs">{status}</Badge>
+  }
+}
+
+function ErrorDetailRow({ run }: { run: CollectionRun }) {
+  const { t } = useTranslation()
+  const { data: detail, isLoading } = useQuery({
+    queryKey: ['collection-run-detail', run.id],
+    queryFn: () => getCollectionRunDetail(run.id),
+  })
+
+  if (isLoading) {
+    return (
+      <tr>
+        <td colSpan={8} className="py-3 px-4">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {t('common.loading')}
+          </div>
+        </td>
+      </tr>
+    )
+  }
+
+  const errors = detail?.errorsJson
+  if (!errors || errors.length === 0) {
+    return (
+      <tr>
+        <td colSpan={8} className="py-3 px-4">
+          <p className="text-xs text-muted-foreground">{t('collection.noErrors')}</p>
+        </td>
+      </tr>
+    )
+  }
+
+  return (
+    <tr>
+      <td colSpan={8} className="py-2 px-4">
+        <div className="max-h-48 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="pb-1 pr-3 font-medium">{t('collection.symbol')}</th>
+                <th className="pb-1 pr-3 font-medium">{t('collection.category')}</th>
+                <th className="pb-1 font-medium">{t('collection.errorMessage')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {errors.map((err, i) => (
+                <tr key={i} className="border-b last:border-0">
+                  <td className="py-1 pr-3 font-mono">{err.symbol || '-'}</td>
+                  <td className="py-1 pr-3">
+                    <Badge variant="outline" className="text-[10px] px-1">
+                      {err.category}
+                    </Badge>
+                  </td>
+                  <td className="py-1 text-red-400 break-all">{err.error}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+function CollectionHistoryPanel() {
+  const { t } = useTranslation()
+  const [marketFilter, setMarketFilter] = useState<string | undefined>(undefined)
+  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const [limit, setLimit] = useState(20)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['collection-runs', { market: marketFilter, limit }],
+    queryFn: () => getCollectionRuns({ market: marketFilter, limit, offset: 0 }),
+    refetchInterval: 30000,
+  })
+
+  const runs = data?.runs ?? []
+  const total = data?.total ?? 0
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg">{t('collection.history')}</CardTitle>
+          <div className="flex gap-1">
+            <Button
+              size="sm"
+              variant={marketFilter == null ? 'default' : 'outline'}
+              onClick={() => setMarketFilter(undefined)}
+            >
+              {t('collection.allMarkets')}
+            </Button>
+            {MARKETS.map((m) => (
+              <Button
+                key={m}
+                size="sm"
+                variant={marketFilter === m ? 'default' : 'outline'}
+                onClick={() => setMarketFilter(m)}
+              >
+                {m.toUpperCase()}
+              </Button>
+            ))}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+        ) : runs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t('common.noData')}</p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left">
+                    <th className="pb-2 pr-2 w-6"></th>
+                    <th className="pb-2 pr-4 font-medium">Market</th>
+                    <th className="pb-2 pr-4 font-medium">{t('collection.type')}</th>
+                    <th className="pb-2 pr-4 font-medium">{t('common.status')}</th>
+                    <th className="pb-2 pr-4 font-medium text-right">{t('collection.symbols')}</th>
+                    <th className="pb-2 pr-4 font-medium text-right">{t('collection.newBars')}</th>
+                    <th className="pb-2 pr-4 font-medium text-right">{t('collection.errors')}</th>
+                    <th className="pb-2 pr-4 font-medium">{t('collection.duration')}</th>
+                    <th className="pb-2 font-medium">{t('collection.time')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map((run) => (
+                    <>
+                      <tr
+                        key={run.id}
+                        className="border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors"
+                        onClick={() => setExpandedId(expandedId === run.id ? null : run.id)}
+                      >
+                        <td className="py-2 pr-2">
+                          {run.errorCount > 0 ? (
+                            expandedId === run.id
+                              ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                              : <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                          ) : (
+                            <span className="inline-block w-4" />
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 font-medium">{run.market.toUpperCase()}</td>
+                        <td className="py-2 pr-4">
+                          <Badge variant="outline" className="text-xs">
+                            {run.triggeredBy === 'scheduler' ? t('collection.scheduled') : run.runType}
+                          </Badge>
+                        </td>
+                        <td className="py-2 pr-4"><RunStatusBadge status={run.status} /></td>
+                        <td className="py-2 pr-4 text-right tabular-nums">{formatNumber(run.symbolsTotal)}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums">{formatNumber(run.newBars)}</td>
+                        <td className={`py-2 pr-4 text-right tabular-nums ${run.errorCount > 0 ? 'text-red-500' : ''}`}>
+                          {run.errorCount}
+                        </td>
+                        <td className="py-2 pr-4 tabular-nums">{formatDuration(run.durationSeconds)}</td>
+                        <td className="py-2 text-muted-foreground">{formatRelativeTime(run.finishedAt ?? run.startedAt)}</td>
+                      </tr>
+                      {expandedId === run.id && run.errorCount > 0 && (
+                        <ErrorDetailRow key={`detail-${run.id}`} run={run} />
+                      )}
+                    </>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {runs.length < total && (
+              <div className="mt-4 text-center">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setLimit((l) => l + 20)}
+                >
+                  {t('collection.loadMore')} ({runs.length}/{total})
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// SchedulePanel
+// ---------------------------------------------------------------------------
 
 function SchedulePanel() {
   const { t } = useTranslation()
@@ -257,6 +550,10 @@ function SchedulePanel() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Main Page
+// ---------------------------------------------------------------------------
+
 export default function CollectionPage() {
   const { t } = useTranslation()
   const { isWsConnected } = useCollectionProgressWs(MARKETS)
@@ -289,6 +586,9 @@ export default function CollectionPage() {
 
       {/* Stock list */}
       <StockListPanel />
+
+      {/* Collection history */}
+      <CollectionHistoryPanel />
 
       {/* Schedule */}
       <SchedulePanel />

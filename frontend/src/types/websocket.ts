@@ -73,6 +73,8 @@ export interface WsCollectionProgressEvent {
   symbols_total: number
   new_bars: number
   percent: number
+  error_count?: number
+  elapsed_seconds?: number
   updated_at: string
 }
 

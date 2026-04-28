@@ -260,7 +260,7 @@ async def _run_collection(market: str) -> None:
     try:
         from app.services import collection_service
 
-        result = await collection_service.collect_market(market)
+        result = await collection_service.collect_market(market, triggered_by="scheduler")
         logger.info(
             "Scheduler: collection for %s complete — symbols=%d, new_bars=%d, errors=%d",
             market,

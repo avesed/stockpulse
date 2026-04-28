@@ -158,6 +158,7 @@ def make_trade(symbol: str, price: float, volume: int,
 def make_collection_progress(
     market: str, symbols_done: int, symbols_total: int,
     new_bars: int, percent: int,
+    error_count: int = 0, elapsed_seconds: float = 0,
 ) -> dict[str, Any]:
     return {
         "type": "collection_progress",
@@ -166,6 +167,8 @@ def make_collection_progress(
         "symbols_total": symbols_total,
         "new_bars": new_bars,
         "percent": percent,
+        "error_count": error_count,
+        "elapsed_seconds": round(elapsed_seconds, 1),
         "updated_at": _now_iso(),
     }
 

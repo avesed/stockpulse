@@ -6,6 +6,10 @@ Daily bars:
   GET  /api/v1/admin/collection/daily-bars/{market}/progress -- get collection progress
   POST /api/v1/admin/collection/daily-bars/{market}/unlock   -- force-release lock
 
+Collection runs (audit):
+  GET  /api/v1/admin/collection/runs          -- paginated list with optional market filter
+  GET  /api/v1/admin/collection/runs/{run_id} -- single run detail with errors
+
 Stock list:
   POST /api/v1/admin/collection/stock-list/build     -- trigger stock list build
   GET  /api/v1/admin/collection/stock-list/progress  -- get stock list build progress
@@ -25,7 +29,7 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import require_admin
 
@@ -167,21 +171,74 @@ async def get_progress(market: str) -> dict[str, Any]:
     """Get collection progress for a market.
 
     Returns the progress dict from Redis, or null if no collection is active.
+    Transforms backend keys to frontend-friendly names.
     """
     market = _validate_market(market)
 
     from app.services import collection_service
 
-    progress = await collection_service.get_progress(market)
+    raw = await collection_service.get_progress(market)
+
+    # Transform to frontend shape
+    progress = None
+    last_run = None
+    if raw is not None:
+        last_run = raw.pop("lastRun", None)
+        # Only build progress if there are actual progress fields
+        if "symbolsDone" in raw:
+            progress = {
+                "current": raw.get("symbolsDone", 0),
+                "total": raw.get("symbolsTotal", 0),
+                "message": f"{raw.get('newBars', 0)} new bars",
+                "elapsedSeconds": raw.get("elapsedSeconds"),
+                "errorsCount": raw.get("errorsCount", 0),
+                "estimatedRemaining": raw.get("estimatedRemaining"),
+                "startedAt": raw.get("startedAt"),
+                "lastRun": last_run,
+            }
 
     return {
         "market": market,
         "progress": progress,
-        "task_running": (
+        "lastRun": last_run,
+        "taskRunning": (
             market in _running_tasks
             and not _running_tasks[market].done()
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Collection run history (audit)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runs")
+async def list_runs(
+    market: Optional[str] = Query(None, description="Filter by market"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Paginated list of collection runs."""
+    from app.services import collection_run_service
+
+    runs, total = await collection_run_service.get_runs(
+        market=market.lower() if market else None,
+        limit=limit,
+        offset=offset,
+    )
+    return {"runs": runs, "total": total}
+
+
+@router.get("/runs/{run_id}")
+async def get_run_detail(run_id: int) -> dict[str, Any]:
+    """Single collection run detail including errors."""
+    from app.services import collection_run_service
+
+    run = await collection_run_service.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.core.redis import get_redis
 from app.core.database import get_db_pool
 from app.services import bar_persistence_service
+from app.services import collection_run_service
 from app.services.daily_bar_service import DailyBarFetcher
 from app.services import symbol_resolver
 
@@ -68,7 +69,9 @@ _fetcher = DailyBarFetcher()
 # ---------------------------------------------------------------------------
 
 
-async def collect_market(market: str) -> dict[str, Any]:
+async def collect_market(
+    market: str, *, triggered_by: str = "api",
+) -> dict[str, Any]:
     """Collect daily bars for a market and upsert into PostgreSQL.
 
     This is the main entry point, equivalent to the backend's
@@ -76,6 +79,7 @@ async def collect_market(market: str) -> dict[str, Any]:
 
     Args:
         market: Market code ('us', 'hk', 'cn', 'metal').
+        triggered_by: Who triggered this run ('api' or 'scheduler').
 
     Returns:
         Summary dict with keys: symbol_count, new_bars, errors.
@@ -88,17 +92,29 @@ async def collect_market(market: str) -> dict[str, Any]:
         )
         return {"symbol_count": 0, "new_bars": 0, "errors": ["Already running"]}
 
+    # Create audit record
+    run_id: int | None = None
+    started_at = datetime.now(timezone.utc)
+    try:
+        run = await collection_run_service.create_run(market, "collect", triggered_by)
+        run_id = run.id
+        started_at = run.started_at or started_at
+    except Exception:
+        logger.warning("Failed to create collection run record for %s", market)
+
     try:
         # 1. Resolve symbols
         symbols = await symbol_resolver.get_symbols(market)
         if not symbols:
             logger.warning("No symbols found for market=%s", market)
+            if run_id:
+                await collection_run_service.fail_run(run_id, "No symbols found")
             return {"symbol_count": 0, "new_bars": 0, "errors": ["No symbols"]}
 
         logger.info(
             "Collection started: market=%s, symbols=%d", market, len(symbols),
         )
-        await _update_progress(market, 0, len(symbols), 0)
+        await _update_progress(market, 0, len(symbols), 0, started_at=started_at, error_count=0)
 
         # 2. Query latest dates from DB
         pool = get_db_pool()
@@ -106,9 +122,9 @@ async def collect_market(market: str) -> dict[str, Any]:
 
         # 3. Fetch + upsert
         if market == "cn":
-            result = await _collect_cn(market, symbols, latest_dates)
+            result = await _collect_cn(market, symbols, latest_dates, started_at)
         else:
-            result = await _collect_yf(market, symbols, latest_dates)
+            result = await _collect_yf(market, symbols, latest_dates, started_at)
 
         logger.info(
             "Collection complete: market=%s, symbols=%d, new_bars=%d, errors=%d",
@@ -118,14 +134,33 @@ async def collect_market(market: str) -> dict[str, Any]:
             len(result.get("errors", [])),
         )
 
+        # Complete audit record
+        if run_id:
+            try:
+                await collection_run_service.complete_run(
+                    run_id,
+                    symbols_total=result.get("symbol_count", 0),
+                    symbols_done=result.get("symbol_count", 0),
+                    new_bars=result.get("new_bars", 0),
+                    errors=result.get("errors", []),
+                )
+                await collection_run_service.cleanup_old_runs()
+            except Exception:
+                logger.warning("Failed to complete run record %d", run_id)
+
         return result
 
     except Exception as exc:
         logger.exception("Collection failed for market=%s: %s", market, exc)
+        if run_id:
+            try:
+                await collection_run_service.fail_run(run_id, str(exc))
+            except Exception:
+                pass
         return {
             "symbol_count": 0,
             "new_bars": 0,
-            "errors": [f"Collection failed: {exc}"],
+            "errors": [{"symbol": "", "error": f"Collection failed: {exc}", "category": "fatal"}],
         }
     finally:
         await _rebuild_counter(market)
@@ -133,13 +168,16 @@ async def collect_market(market: str) -> dict[str, Any]:
         await _release_lock(market, owner)
 
 
-async def rebuild_market(market: str) -> dict[str, Any]:
+async def rebuild_market(
+    market: str, *, triggered_by: str = "api",
+) -> dict[str, Any]:
     """Delete all bars for a market, then re-collect from scratch.
 
     Equivalent to the backend's ``rebuild_market_daily_bars`` Celery task.
 
     Args:
         market: Market code ('us', 'hk', 'cn', 'metal').
+        triggered_by: Who triggered this run ('api' or 'scheduler').
 
     Returns:
         Summary dict with keys: symbol_count, new_bars, deleted, errors.
@@ -152,6 +190,16 @@ async def rebuild_market(market: str) -> dict[str, Any]:
         )
         return {"symbol_count": 0, "new_bars": 0, "deleted": 0, "errors": ["Already running"]}
 
+    # Create audit record
+    run_id: int | None = None
+    started_at = datetime.now(timezone.utc)
+    try:
+        run = await collection_run_service.create_run(market, "rebuild", triggered_by)
+        run_id = run.id
+        started_at = run.started_at or started_at
+    except Exception:
+        logger.warning("Failed to create rebuild run record for %s", market)
+
     try:
         pool = get_db_pool()
 
@@ -163,6 +211,8 @@ async def rebuild_market(market: str) -> dict[str, Any]:
         symbols = await symbol_resolver.get_symbols(market)
         if not symbols:
             logger.warning("No symbols found for market=%s after delete", market)
+            if run_id:
+                await collection_run_service.fail_run(run_id, "No symbols found after delete")
             return {
                 "symbol_count": 0,
                 "new_bars": 0,
@@ -174,15 +224,15 @@ async def rebuild_market(market: str) -> dict[str, Any]:
             "Rebuild phase 2: collecting %d symbols for market=%s",
             len(symbols), market,
         )
-        await _update_progress(market, 0, len(symbols), 0)
+        await _update_progress(market, 0, len(symbols), 0, started_at=started_at, error_count=0)
 
         # Latest dates will all be empty since we deleted everything
         latest_dates: dict[str, date] = {}
 
         if market == "cn":
-            result = await _collect_cn(market, symbols, latest_dates)
+            result = await _collect_cn(market, symbols, latest_dates, started_at)
         else:
-            result = await _collect_yf(market, symbols, latest_dates)
+            result = await _collect_yf(market, symbols, latest_dates, started_at)
 
         result["deleted"] = deleted
 
@@ -194,15 +244,34 @@ async def rebuild_market(market: str) -> dict[str, Any]:
             len(result.get("errors", [])),
         )
 
+        # Complete audit record
+        if run_id:
+            try:
+                await collection_run_service.complete_run(
+                    run_id,
+                    symbols_total=result.get("symbol_count", 0),
+                    symbols_done=result.get("symbol_count", 0),
+                    new_bars=result.get("new_bars", 0),
+                    errors=result.get("errors", []),
+                )
+                await collection_run_service.cleanup_old_runs()
+            except Exception:
+                logger.warning("Failed to complete run record %d", run_id)
+
         return result
 
     except Exception as exc:
         logger.exception("Rebuild failed for market=%s: %s", market, exc)
+        if run_id:
+            try:
+                await collection_run_service.fail_run(run_id, str(exc))
+            except Exception:
+                pass
         return {
             "symbol_count": 0,
             "new_bars": 0,
             "deleted": 0,
-            "errors": [f"Rebuild failed: {exc}"],
+            "errors": [{"symbol": "", "error": f"Rebuild failed: {exc}", "category": "fatal"}],
         }
     finally:
         await _rebuild_counter(market)
@@ -219,6 +288,7 @@ async def _collect_cn(
     market: str,
     symbols: list[str],
     latest_dates: dict[str, date],
+    started_at: datetime,
 ) -> dict[str, Any]:
     """Collect CN daily bars in sequential batches of _CN_BATCH_SIZE.
 
@@ -228,7 +298,7 @@ async def _collect_cn(
     pool = get_db_pool()
     today = date.today()
     total_inserted = 0
-    errors: list[str] = []
+    errors: list[dict] = []
     symbols_done = 0
     symbols_with_data = 0
 
@@ -240,7 +310,7 @@ async def _collect_cn(
         skipped = 0
         for sym in batch:
             last_date = latest_dates.get(sym)
-            if last_date is not None and last_date + timedelta(days=1) >= today:
+            if last_date is not None and last_date >= today:
                 skipped += 1
                 continue
             start_date = (
@@ -260,9 +330,11 @@ async def _collect_cn(
                     "CN fetch_batch failed (offset=%d, size=%d): %s",
                     batch_start, len(batch_request), exc,
                 )
-                errors.append(
-                    f"batch {batch_start // _CN_BATCH_SIZE}: fetch error - {exc}"
-                )
+                errors.append({
+                    "symbol": f"batch-{batch_start // _CN_BATCH_SIZE}",
+                    "error": f"fetch error - {exc}",
+                    "category": "batch",
+                })
                 results, fetch_errors = {}, {}
 
             # Upsert results to DB
@@ -278,16 +350,19 @@ async def _collect_cn(
                     )
                     total_inserted += count
                 except Exception as exc:
-                    errors.append(f"{symbol}: upsert - {exc}")
+                    errors.append({"symbol": symbol, "error": str(exc), "category": "upsert"})
 
             symbols_with_data += len(results)
 
             # Record fetch errors
             for sym, msg in fetch_errors.items():
-                errors.append(f"{sym}: {msg}")
+                errors.append({"symbol": sym, "error": msg, "category": "fetch"})
 
         symbols_done += len(batch)
-        await _update_progress(market, symbols_done, len(symbols), total_inserted)
+        await _update_progress(
+            market, symbols_done, len(symbols), total_inserted,
+            started_at=started_at, error_count=len(errors),
+        )
 
         logger.info(
             "CN batch: %d/%d done (%d with data, %d skipped, %d errors)",
@@ -310,6 +385,7 @@ async def _collect_yf(
     market: str,
     symbols: list[str],
     latest_dates: dict[str, date],
+    started_at: datetime,
 ) -> dict[str, Any]:
     """Collect daily bars via yfinance with windowed parallel fetching.
 
@@ -320,7 +396,7 @@ async def _collect_yf(
     pool = get_db_pool()
     today = date.today()
     total_inserted = 0
-    errors: list[str] = []
+    errors: list[dict] = []
 
     # Group symbols by start_date
     date_groups: dict[Optional[str], list[str]] = defaultdict(list)
@@ -331,10 +407,10 @@ async def _collect_yf(
         if last_date is None:
             date_groups[None].append(sym)
         else:
-            start = last_date + timedelta(days=1)
-            if start >= today:
+            if last_date >= today:
                 up_to_date_count += 1
                 continue
+            start = last_date + timedelta(days=1)
             date_groups[start.isoformat()].append(sym)
 
     if up_to_date_count:
@@ -374,7 +450,7 @@ async def _collect_yf(
                     start_str, len(batch_symbols), exc,
                 )
                 for sym in batch_symbols:
-                    errors.append(f"{sym}: batch error - {exc}")
+                    errors.append({"symbol": sym, "error": f"batch error - {exc}", "category": "batch"})
                 return None
 
     # Process in windows of _YF_WINDOW_SIZE batches
@@ -406,21 +482,24 @@ async def _collect_yf(
                         )
                         total_inserted += count
                     except Exception as exc:
-                        errors.append(f"{symbol}: upsert error - {exc}")
+                        errors.append({"symbol": symbol, "error": str(exc), "category": "upsert"})
                         logger.error("Upsert failed for %s: %s", symbol, exc)
 
                 symbols_with_data += len(results)
 
                 for sym, msg in fetch_errors.items():
-                    errors.append(f"{sym}: {msg}")
+                    errors.append({"symbol": sym, "error": msg, "category": "fetch"})
             else:
-                errors.append(
-                    f"batch: fetch failed (start={start_str}, size={len(batch_symbols)})"
-                )
+                errors.append({
+                    "symbol": f"batch(start={start_str})",
+                    "error": f"fetch failed (size={len(batch_symbols)})",
+                    "category": "batch",
+                })
 
             symbols_done += len(batch_symbols)
             await _update_progress(
                 market, symbols_done, len(symbols), total_inserted,
+                started_at=started_at, error_count=len(errors),
             )
 
         # Log after each window
@@ -511,19 +590,32 @@ async def _update_progress(
     symbols_done: int,
     symbols_total: int,
     new_bars: int,
+    *,
+    started_at: datetime | None = None,
+    error_count: int = 0,
 ) -> None:
     """Write collection progress to Redis for admin UI consumption."""
     try:
         r = await get_redis()
+        now = datetime.now(timezone.utc)
         pct = (
             int(symbols_done * 100 / symbols_total) if symbols_total > 0 else 0
         )
+        elapsed = (now - started_at).total_seconds() if started_at else 0
+        estimated_remaining = None
+        if started_at and symbols_done > 0 and symbols_done < symbols_total:
+            estimated_remaining = round(elapsed * (symbols_total - symbols_done) / symbols_done, 1)
+
         progress = {
             "symbolsDone": symbols_done,
             "symbolsTotal": symbols_total,
             "newBars": new_bars,
             "percent": pct,
-            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "elapsedSeconds": round(elapsed, 1),
+            "errorsCount": error_count,
+            "estimatedRemaining": estimated_remaining,
+            "startedAt": started_at.isoformat() if started_at else None,
+            "updatedAt": now.isoformat(),
         }
         key = _PROGRESS_KEY_TEMPLATE.format(market=market)
         await r.setex(key, _PROGRESS_TTL, json.dumps(progress))
@@ -531,7 +623,10 @@ async def _update_progress(
         from app.ws.redis_fanout import publish_collection_progress
         from app.ws.protocol import make_collection_progress
         await publish_collection_progress(
-            make_collection_progress(market, symbols_done, symbols_total, new_bars, pct)
+            make_collection_progress(
+                market, symbols_done, symbols_total, new_bars, pct,
+                error_count=error_count, elapsed_seconds=elapsed,
+            )
         )
     except Exception:
         pass  # Non-critical
@@ -550,15 +645,31 @@ async def get_progress(market: str) -> Optional[dict[str, Any]]:
     """Read collection progress from Redis (for admin API).
 
     Returns:
-        Progress dict or None if no collection is in progress.
+        Progress dict (with optional lastRun summary) or None if no collection is in progress.
     """
+    progress = None
     try:
         r = await get_redis()
         data = await r.get(_PROGRESS_KEY_TEMPLATE.format(market=market))
         if data is not None:
-            return json.loads(data)
+            progress = json.loads(data)
     except Exception as exc:
         logger.warning("Failed to read progress for %s: %s", market, exc)
+
+    # Attach last completed run summary
+    last_run = None
+    try:
+        last_run = await collection_run_service.get_last_completed(market)
+    except Exception:
+        pass
+
+    if progress is not None:
+        progress["lastRun"] = last_run
+        return progress
+
+    # Even when no active progress, return lastRun if available
+    if last_run is not None:
+        return {"lastRun": last_run}
     return None
 
 

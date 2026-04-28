@@ -60,8 +60,46 @@ export interface CollectionProgress {
     current?: number
     total?: number
     message?: string
+    elapsedSeconds?: number
+    errorsCount?: number
+    estimatedRemaining?: number | null
+    startedAt?: string
+    lastRun?: LastRunSummary | null
   } | null
   taskRunning: boolean
+  lastRun?: LastRunSummary | null
+}
+
+export interface LastRunSummary {
+  status: string
+  durationSeconds: number | null
+  errorCount: number
+  newBars: number
+  finishedAt: string | null
+}
+
+export interface CollectionRun {
+  id: number
+  market: string
+  runType: 'collect' | 'rebuild' | 'scheduled'
+  status: 'running' | 'completed' | 'failed'
+  symbolsTotal: number
+  symbolsDone: number
+  newBars: number
+  errorCount: number
+  startedAt: string
+  finishedAt: string | null
+  durationSeconds: number | null
+  triggeredBy: string
+}
+
+export interface CollectionRunDetail extends CollectionRun {
+  errorsJson: Array<{ symbol: string; error: string; category: string }> | null
+}
+
+export interface CollectionRunsResponse {
+  runs: CollectionRun[]
+  total: number
 }
 
 export interface SchedulerJob {

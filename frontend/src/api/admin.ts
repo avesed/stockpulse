@@ -4,6 +4,8 @@ import type {
   ApiConsumer,
   ProviderConfig,
   CollectionProgress,
+  CollectionRunsResponse,
+  CollectionRunDetail,
   SchedulerStatus,
   ConsumerRequestStats,
   SystemSetting,
@@ -85,6 +87,19 @@ export async function rebuildCollection(market: string): Promise<{ status: strin
 
 export async function unlockCollection(market: string): Promise<void> {
   await apiClient.post(`/admin/collection/daily-bars/${market}/unlock`)
+}
+
+// Collection — runs (audit history)
+export async function getCollectionRuns(params: {
+  market?: string | undefined; limit?: number; offset?: number
+}): Promise<CollectionRunsResponse> {
+  const response = await apiClient.get<CollectionRunsResponse>('/admin/collection/runs', { params })
+  return response.data
+}
+
+export async function getCollectionRunDetail(runId: number): Promise<CollectionRunDetail> {
+  const response = await apiClient.get<CollectionRunDetail>(`/admin/collection/runs/${runId}`)
+  return response.data
 }
 
 // Collection — stock list
