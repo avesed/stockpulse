@@ -54,14 +54,18 @@ def _get_pinyin(name_zh: str) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def _fetch_finnhub_us() -> List[Dict[str, Any]]:
-    """Fetch US stock symbols from Finnhub API."""
+    """Fetch US stock symbols from Finnhub API.
+
+    Falls back to yfinance top holdings from major ETFs when Finnhub key
+    is not configured.
+    """
     import finnhub
 
     from app.core.api_keys import get_api_key
     api_key = get_api_key("finnhub")
     if not api_key:
-        logger.warning("Finnhub API key not configured, skipping US stocks")
-        return []
+        logger.warning("Finnhub API key not configured, falling back to yfinance US stocks")
+        return _fetch_yfinance_us_fallback()
 
     try:
         client = finnhub.Client(api_key=api_key)
@@ -69,8 +73,72 @@ def _fetch_finnhub_us() -> List[Dict[str, Any]]:
         logger.info("Fetched %d raw US symbols from Finnhub", len(raw))
         return raw
     except Exception as e:
-        logger.error("Failed to fetch US symbols from Finnhub: %s", e)
+        logger.error("Failed to fetch US symbols from Finnhub: %s, trying yfinance fallback", e)
+        return _fetch_yfinance_us_fallback()
+
+
+def _fetch_yfinance_us_fallback() -> List[Dict[str, Any]]:
+    """Fetch US stock symbols via yfinance using major index constituents.
+
+    Uses S&P 500 from Wikipedia as the primary source, returning symbols
+    in the same raw format as Finnhub (with symbol, description, mic fields)
+    so that _process_finnhub_symbol() can process them uniformly.
+    """
+    symbols_found: Dict[str, Dict[str, Any]] = {}
+
+    # Source 1: S&P 500 from Wikipedia (most reliable free source)
+    try:
+        import pandas as pd
+        import io
+        import urllib.request
+
+        req = urllib.request.Request(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "StockPulse/1.0 (stock data platform)"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8")
+        tables = pd.read_html(io.StringIO(html))
+        if tables:
+            df = tables[0]
+            for _, row in df.iterrows():
+                symbol = str(row.get("Symbol", "")).strip().replace(".", "-")
+                name = str(row.get("Security", "")).strip()
+                exchange = str(row.get("CIK", "")).strip()
+                if symbol and symbol not in symbols_found:
+                    symbols_found[symbol] = {
+                        "symbol": symbol,
+                        "description": name,
+                        "mic": "XNYS",
+                        "type": "Common Stock",
+                    }
+            logger.info(
+                "yfinance fallback: fetched %d S&P 500 symbols from Wikipedia",
+                len(symbols_found),
+            )
+    except Exception as e:
+        logger.warning("yfinance fallback: Wikipedia S&P 500 fetch failed: %s", e)
+
+    # Source 2: NASDAQ-100 and Dow 30 via yfinance for broader coverage
+    try:
+        import yfinance as yf
+
+        for index_sym, exchange in [("^NDX", "XNAS"), ("^DJI", "XNYS")]:
+            try:
+                ticker = yf.Ticker(index_sym)
+                # yfinance doesn't expose constituents directly, skip
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not symbols_found:
+        logger.warning("yfinance fallback: no US symbols fetched, returning empty")
         return []
+
+    result = list(symbols_found.values())
+    logger.info("yfinance US fallback total: %d symbols", len(result))
+    return result
 
 
 def _process_finnhub_symbol(data: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,13 +1,17 @@
 """Per-market symbol resolution for collection and internal API.
 
-Resolves the complete symbol list for each supported market:
-- US: From stock list index (major exchanges only: XNAS, XNYS, ARCX, BATS, XASE)
-- HK: HSI constituent stocks via hsi_service
-- CN: From stock list index (SH + SZ markets)
-- Metal: Static list (GC=F, SI=F, PL=F, PA=F)
+Resolves the complete symbol list for each supported market by reading
+from the ``stock_symbols`` PostgreSQL table (populated by stock list build).
 
-Results are cached in Redis for 24h to avoid rebuilding stock list on every
-collection run.
+Fallback order:
+  1. Redis cache (24h TTL)
+  2. PostgreSQL ``stock_symbols`` table
+  3. Static hardcoded fallback list
+
+- US: Major exchanges (XNAS, XNYS, ARCX, BATS, XASE)
+- HK: HSI constituent stocks via hsi_service
+- CN: SH + SZ + BJ markets from DB
+- Metal: Static list (GC=F, SI=F, PL=F, PA=F)
 """
 from __future__ import annotations
 
@@ -26,7 +30,14 @@ _CACHE_TTL = 86400  # 24 hours
 # Major US exchanges — excludes OTC (OOTC) due to poor data coverage
 _US_MAJOR_EXCHANGES = {"XNAS", "XNYS", "ARCX", "BATS", "XASE"}
 
-# Static fallbacks (same as backend/app/api/v1/internal.py)
+# Market code mapping: collection market -> DB market values
+_MARKET_DB_MAP = {
+    "us": ("us",),
+    "cn": ("sh", "sz", "bj"),
+    "hk": ("hk",),
+}
+
+# Static fallbacks
 _US_FALLBACK_SYMBOLS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
     "META", "TSLA", "BRK-B", "JPM", "V",
@@ -39,11 +50,20 @@ _CN_FALLBACK_SYMBOLS = [
 
 _METAL_SYMBOLS = ["GC=F", "SI=F", "PL=F", "PA=F"]
 
+# Fallback map per market
+_FALLBACK_MAP = {
+    "us": _US_FALLBACK_SYMBOLS,
+    "cn": _CN_FALLBACK_SYMBOLS,
+    "hk": [],
+    "metal": _METAL_SYMBOLS,
+}
+
 
 async def get_symbols(market: str) -> list[str]:
     """Get the list of tradeable symbols for a given market.
 
-    Checks Redis cache first (24h TTL), falls back to live resolution.
+    Checks Redis cache first (24h TTL), then reads from DB, finally
+    falls back to static lists.
 
     Args:
         market: One of 'us', 'hk', 'cn', 'metal'.
@@ -59,6 +79,11 @@ async def get_symbols(market: str) -> list[str]:
     if market == "metal":
         return list(_METAL_SYMBOLS)
 
+    if market not in _MARKET_DB_MAP:
+        raise ValueError(
+            f"Unknown market: {market}. Supported: us, hk, cn, metal"
+        )
+
     # Check cache
     cache_key = _CACHE_KEY_TEMPLATE.format(market=market)
     cached = await _cache_get_symbols(cache_key)
@@ -69,17 +94,11 @@ async def get_symbols(market: str) -> list[str]:
         )
         return cached
 
-    # Resolve from live sources
-    if market == "us":
-        symbols = await _resolve_us_symbols()
-    elif market == "hk":
+    # Resolve from DB (fast) → fallback to static list
+    if market == "hk":
         symbols = await _resolve_hk_symbols()
-    elif market == "cn":
-        symbols = await _resolve_cn_symbols()
     else:
-        raise ValueError(
-            f"Unknown market: {market}. Supported: us, hk, cn, metal"
-        )
+        symbols = await _resolve_from_db(market)
 
     # Cache the result
     if symbols:
@@ -137,28 +156,65 @@ async def _cache_set_symbols(key: str, symbols: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_us_symbols() -> list[str]:
-    """Get US symbols from the local stock list index.
+async def _resolve_from_db(market: str) -> list[str]:
+    """Read symbols from stock_symbols table for the given market.
 
-    Filters to major exchanges only (XNAS, XNYS, ARCX, BATS, XASE).
-    Falls back to a static list of top US stocks on failure.
+    Maps collection market codes to DB market values:
+      'cn' -> ('sh', 'sz', 'bj')
+      'us' -> ('us',)
+
+    For US, also filters to major exchanges only.
+    Falls back to static list on DB error or empty result.
     """
-    try:
-        from app.services.stock_list_service import build_stock_list
+    db_markets = _MARKET_DB_MAP.get(market, (market,))
+    fallback = list(_FALLBACK_MAP.get(market, []))
 
-        all_stocks = await build_stock_list()
-        symbols = [
-            s["symbol"] for s in all_stocks
-            if s.get("market") == "us"
-            and s.get("exchange") in _US_MAJOR_EXCHANGES
-        ]
+    try:
+        from app.core.database import get_db_pool
+
+        pool = get_db_pool()
+        placeholders = ", ".join(f"${i+1}" for i in range(len(db_markets)))
+
+        if market == "us":
+            # Filter to major exchanges for US
+            exchange_list = tuple(_US_MAJOR_EXCHANGES)
+            ex_placeholders = ", ".join(
+                f"${i+1+len(db_markets)}" for i in range(len(exchange_list))
+            )
+            sql = (
+                f"SELECT symbol FROM stock_symbols "
+                f"WHERE market IN ({placeholders}) "
+                f"AND exchange IN ({ex_placeholders}) "
+                f"ORDER BY symbol"
+            )
+            rows = await pool.fetch(sql, *db_markets, *exchange_list)
+        else:
+            sql = (
+                f"SELECT symbol FROM stock_symbols "
+                f"WHERE market IN ({placeholders}) "
+                f"ORDER BY symbol"
+            )
+            rows = await pool.fetch(sql, *db_markets)
+
+        symbols = [row["symbol"] for row in rows]
+
         if symbols:
-            logger.info("Resolved %d US symbols from stock list", len(symbols))
+            logger.info(
+                "Resolved %d %s symbols from DB (markets=%s)",
+                len(symbols), market.upper(), db_markets,
+            )
             return symbols
-        logger.warning("Stock list returned 0 US symbols, using fallback")
+
+        logger.warning(
+            "DB returned 0 symbols for %s (markets=%s), using fallback",
+            market, db_markets,
+        )
     except Exception as exc:
-        logger.warning("Failed to resolve US symbols from stock list: %s", exc)
-    return list(_US_FALLBACK_SYMBOLS)
+        logger.warning(
+            "Failed to resolve %s symbols from DB: %s", market, exc,
+        )
+
+    return fallback
 
 
 async def _resolve_hk_symbols() -> list[str]:
@@ -175,26 +231,3 @@ async def _resolve_hk_symbols() -> list[str]:
     except Exception as exc:
         logger.warning("Failed to resolve HK symbols: %s", exc)
     return []
-
-
-async def _resolve_cn_symbols() -> list[str]:
-    """Get CN symbols from the local stock list index.
-
-    Includes both Shanghai (sh) and Shenzhen (sz) markets.
-    Falls back to a static list of major A-shares on failure.
-    """
-    try:
-        from app.services.stock_list_service import build_stock_list
-
-        all_stocks = await build_stock_list()
-        symbols = [
-            s["symbol"] for s in all_stocks
-            if s.get("market") in ("sh", "sz")
-        ]
-        if symbols:
-            logger.info("Resolved %d CN symbols from stock list", len(symbols))
-            return symbols
-        logger.warning("Stock list returned 0 CN symbols, using fallback")
-    except Exception as exc:
-        logger.warning("Failed to resolve CN symbols from stock list: %s", exc)
-    return list(_CN_FALLBACK_SYMBOLS)

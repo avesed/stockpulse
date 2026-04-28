@@ -31,6 +31,12 @@ COPY docker/supervisord.conf /etc/supervisor/conf.d/stockpulse.conf
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Pre-create yfinance cache directories to prevent race conditions
+RUN mkdir -p /root/.cache/py-yfinance && chmod 777 /root/.cache/py-yfinance
+
+# Pre-create data directories for profile collection
+RUN mkdir -p /app/data/profiles/cn /app/data/profiles/us /app/data/profiles/hk
+
 # Remove default nginx config
 RUN rm -f /etc/nginx/sites-enabled/default
 

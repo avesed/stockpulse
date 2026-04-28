@@ -78,7 +78,11 @@ def _fetch_via_index_cons() -> Optional[List[str]]:
     """
     import akshare as ak
 
-    df = ak.index_stock_cons("HSI")
+    try:
+        df = ak.index_stock_cons("HSI")
+    except Exception as e:
+        logger.warning("akshare index_stock_cons raised: %s", e)
+        return None
     if df is None or df.empty:
         return None
 
