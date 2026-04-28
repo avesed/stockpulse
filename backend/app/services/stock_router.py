@@ -45,13 +45,15 @@ class StockRouter:
         akshare: DataProvider,
         tushare: Optional[DataProvider] = None,
         tiingo: Optional[DataProvider] = None,
-        polygon: Optional[DataProvider] = None,
+        massive: Optional[DataProvider] = None,
+        finnhub: Optional[DataProvider] = None,
     ):
         self._yfinance = yfinance
         self._akshare = akshare
         self._tushare = tushare
         self._tiingo = tiingo
-        self._polygon = polygon
+        self._massive = massive
+        self._finnhub = finnhub
 
         # Build routing table: market str -> list of providers (priority order)
         tushare_list = (
@@ -60,21 +62,42 @@ class StockRouter:
         tiingo_list = (
             [tiingo] if tiingo and tiingo.is_available() else []
         )
-        polygon_list = (
-            [polygon] if polygon and polygon.is_available() else []
+        massive_list = (
+            [massive] if massive and massive.is_available() else []
+        )
+        finnhub_list = (
+            [finnhub] if finnhub and finnhub.is_available() else []
         )
 
         self._routing: Dict[str, List[DataProvider]] = {
-            US: [yfinance] + polygon_list + tiingo_list,
+            US: [yfinance] + massive_list + finnhub_list + tiingo_list,
             METAL: [yfinance],
             HK: [akshare, yfinance],
             SH: [akshare] + tushare_list + [yfinance],
             SZ: [akshare] + tushare_list + [yfinance],
         }
 
+        # Name-based lookup for per-provider endpoints
+        self._providers_by_name: Dict[str, DataProvider] = {
+            "yfinance": yfinance,
+            "akshare": akshare,
+        }
+        if tushare:
+            self._providers_by_name["tushare"] = tushare
+        if tiingo:
+            self._providers_by_name["tiingo"] = tiingo
+        if massive:
+            self._providers_by_name["massive"] = massive
+        if finnhub:
+            self._providers_by_name["finnhub"] = finnhub
+
     def get_providers(self, market: str) -> List[DataProvider]:
         """Get ordered list of providers for a market."""
         return self._routing.get(market, [self._yfinance])
+
+    def get_provider_by_name(self, name: str) -> Optional[DataProvider]:
+        """Get a specific provider by name, or None if not available."""
+        return self._providers_by_name.get(name)
 
     async def _try_providers(
         self,
@@ -255,9 +278,14 @@ class StockRouter:
         return self._tiingo
 
     @property
-    def polygon(self) -> Optional[DataProvider]:
-        """Direct access to polygon provider (may be None)."""
-        return self._polygon
+    def massive(self) -> Optional[DataProvider]:
+        """Direct access to massive provider (may be None)."""
+        return self._massive
+
+    @property
+    def finnhub(self) -> Optional[DataProvider]:
+        """Direct access to finnhub provider (may be None)."""
+        return self._finnhub
 
     # === Convenience Methods (combining data from multiple providers) ===
 
@@ -418,6 +446,13 @@ _router: Optional[StockRouter] = None
 _router_lock = asyncio.Lock()
 
 
+def reset_router() -> None:
+    """Reset singleton so the next call to get_stock_router() rebuilds it."""
+    global _router
+    _router = None
+    logger.info("StockRouter singleton reset — will reinitialize on next request")
+
+
 async def get_stock_router() -> StockRouter:
     """Get singleton StockRouter instance."""
     global _router
@@ -428,7 +463,8 @@ async def get_stock_router() -> StockRouter:
                 from app.providers.akshare_provider import AKShareProvider
                 from app.providers.tushare_provider import TushareProvider
                 from app.providers.tiingo_provider import TiingoProvider
-                from app.providers.polygon_provider import PolygonProvider
+                from app.providers.massive_provider import MassiveProvider
+                from app.providers.finnhub_provider import FinnhubProvider
 
                 yfinance = YFinanceProvider()
                 akshare = AKShareProvider()
@@ -442,14 +478,19 @@ async def get_stock_router() -> StockRouter:
                     if TiingoProvider.is_available()
                     else None
                 )
-                polygon = (
-                    PolygonProvider()
-                    if PolygonProvider.is_available()
+                massive = (
+                    MassiveProvider()
+                    if MassiveProvider.is_available()
+                    else None
+                )
+                finnhub = (
+                    FinnhubProvider()
+                    if FinnhubProvider.is_available()
                     else None
                 )
 
                 _router = StockRouter(
-                    yfinance, akshare, tushare, tiingo, polygon
+                    yfinance, akshare, tushare, tiingo, massive, finnhub
                 )
 
                 providers = ["yfinance", "akshare"]
@@ -457,8 +498,10 @@ async def get_stock_router() -> StockRouter:
                     providers.append("tushare")
                 if tiingo:
                     providers.append("tiingo")
-                if polygon:
-                    providers.append("polygon")
+                if massive:
+                    providers.append("massive")
+                if finnhub:
+                    providers.append("finnhub")
                 logger.info(
                     "StockRouter initialized: %s", ", ".join(providers)
                 )

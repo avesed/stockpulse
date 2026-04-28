@@ -1,6 +1,6 @@
-"""Polygon.io data provider for US stocks.
+"""Massive (formerly Polygon.io) data provider for US stocks.
 
-Polygon.io provides comprehensive market data including:
+Massive provides comprehensive market data including:
 - Real-time and delayed stock quotes
 - Historical aggregates (OHLCV bars)
 - Ticker search and details
@@ -61,17 +61,18 @@ def _ttl(data_type: str) -> int:
     return jittered_ttl(base, jitter)
 
 
-class PolygonProvider(DataProvider):
-    """Polygon.io data provider for US stocks.
+class MassiveProvider(DataProvider):
+    """Massive (formerly Polygon.io) data provider for US stocks.
 
-    Requires POLYGON_API_KEY setting.
+    Requires MASSIVE_API_KEY setting.
     """
 
     _client = None
+    _client_key: str | None = None  # key used to create _client
 
     @property
     def name(self) -> str:
-        return "polygon"
+        return "massive"
 
     @property
     def supported_markets(self) -> Set[str]:
@@ -79,14 +80,24 @@ class PolygonProvider(DataProvider):
 
     @classmethod
     def is_available(cls) -> bool:
-        return bool(get_api_key("polygon"))
+        return bool(get_api_key("massive"))
 
     def _get_client(self):
-        if PolygonProvider._client is None and self.is_available():
+        current_key = get_api_key("massive")
+        if not current_key:
+            return None
+
+        # Rebuild client if key changed
+        if MassiveProvider._client is not None and MassiveProvider._client_key != current_key:
+            logger.info("Massive API key changed, rebuilding client")
+            MassiveProvider._client = None
+
+        if MassiveProvider._client is None:
             try:
                 from polygon import RESTClient
 
-                PolygonProvider._client = RESTClient(api_key=get_api_key("polygon"))
+                MassiveProvider._client = RESTClient(api_key=current_key)
+                MassiveProvider._client_key = current_key
             except ImportError:
                 logger.warning(
                     "polygon-api-client package not installed. "
@@ -94,9 +105,9 @@ class PolygonProvider(DataProvider):
                 )
                 return None
             except Exception as e:
-                logger.error("Failed to initialize Polygon client: %s", e)
+                logger.error("Failed to initialize Massive client: %s", e)
                 return None
-        return PolygonProvider._client
+        return MassiveProvider._client
 
     async def _cached_or_fetch(
         self,
@@ -104,7 +115,7 @@ class PolygonProvider(DataProvider):
         identifier: str,
         fetch_func,
     ) -> Optional[Dict[str, Any]]:
-        cache_key = f"polygon:{data_type}:{identifier}"
+        cache_key = f"massive:{data_type}:{identifier}"
         cached = await cache_get(cache_key)
         if cached is not None:
             return cached
@@ -142,7 +153,7 @@ class PolygonProvider(DataProvider):
                         return None
                     return results[0]
                 except Exception as e:
-                    logger.warning("Polygon quote error: %s", e)
+                    logger.warning("Massive quote error: %s", e)
                     return None
 
             agg = await run_in_executor(fetch)
@@ -169,10 +180,10 @@ class PolygonProvider(DataProvider):
                 "timestamp": datetime.utcnow().isoformat(),
                 "market": market,
                 "currency": "USD",
-                "source": "polygon",
+                "source": "massive",
             }
         except Exception as e:
-            logger.error("Polygon quote error for %s: %s", symbol, e)
+            logger.error("Massive quote error for %s: %s", symbol, e)
             return None
 
     async def get_history(
@@ -189,7 +200,7 @@ class PolygonProvider(DataProvider):
 
         mapping = _INTERVAL_MAP.get(interval)
         if not mapping:
-            logger.debug("Polygon doesn't support interval: %s", interval)
+            logger.debug("Massive doesn't support interval: %s", interval)
             return None
 
         timespan, multiplier = mapping
@@ -223,7 +234,7 @@ class PolygonProvider(DataProvider):
                     )
                     return list(aggs) if aggs else None
                 except Exception as e:
-                    logger.warning("Polygon history error: %s", e)
+                    logger.warning("Massive history error: %s", e)
                     return None
 
             data = await run_in_executor(fetch)
@@ -253,10 +264,10 @@ class PolygonProvider(DataProvider):
                 "interval": interval,
                 "bars": bars,
                 "market": market,
-                "source": "polygon",
+                "source": "massive",
             }
         except Exception as e:
-            logger.error("Polygon history error for %s: %s", symbol, e)
+            logger.error("Massive history error for %s: %s", symbol, e)
             return None
 
     async def search(
@@ -280,7 +291,7 @@ class PolygonProvider(DataProvider):
                     )
                     return list(results) if results else []
                 except Exception as e:
-                    logger.warning("Polygon search error: %s", e)
+                    logger.warning("Massive search error: %s", e)
                     return []
 
             tickers = await run_in_executor(fetch)
@@ -294,7 +305,7 @@ class PolygonProvider(DataProvider):
                 for t in tickers
             ]
         except Exception as e:
-            logger.error("Polygon search error for %s: %s", query, e)
+            logger.error("Massive search error for %s: %s", query, e)
             return []
 
     # === Optional Methods ===
@@ -327,10 +338,10 @@ class PolygonProvider(DataProvider):
                         "currency": getattr(details, "currency_name", "USD"),
                         "exchange": getattr(details, "primary_exchange", ""),
                         "market": market,
-                        "source": "polygon",
+                        "source": "massive",
                     }
                 except Exception as e:
-                    logger.warning("Polygon info error: %s", e)
+                    logger.warning("Massive info error: %s", e)
                     return None
 
             return await run_in_executor(_fetch_sync)

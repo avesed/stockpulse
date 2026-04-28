@@ -146,6 +146,16 @@ app.include_router(reference_router)
 app.include_router(internal_router)
 app.include_router(collection_router)
 
-# WebSocket router
+# Per-provider data API routers (X-API-Key auth, direct provider access)
+from app.api.public.provider_endpoints import create_provider_router  # noqa: E402
+for _provider_name in ("yfinance", "akshare", "tushare", "tiingo", "massive", "finnhub"):
+    app.include_router(create_provider_router(_provider_name))
+
+# WebSocket router (unified)
 from app.ws.endpoints import router as ws_router  # noqa: E402
 app.include_router(ws_router)
+
+# Per-provider WebSocket routers
+from app.ws.provider_ws import create_provider_ws_router  # noqa: E402
+for _ws_provider in ("massive", "finnhub", "yfinance"):
+    app.include_router(create_provider_ws_router(_ws_provider))

@@ -93,6 +93,15 @@ async def update_provider(
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
 
+    logger.info(
+        "Provider update request for %s: display_name=%r, is_enabled=%r, api_key=%s, config_json=%r",
+        provider.provider_name,
+        body.display_name,
+        body.is_enabled,
+        f"[{len(body.api_key)} chars]" if body.api_key else repr(body.api_key),
+        body.config_json,
+    )
+
     if body.display_name is not None:
         provider.display_name = body.display_name
     if body.is_enabled is not None:
@@ -103,12 +112,19 @@ async def update_provider(
         provider.config_json = body.config_json
     provider.updated_at = datetime.now(timezone.utc)
 
-    # Notify api_keys module to reload
+    # Commit first so the subscriber reads fresh data
+    await db.commit()
+
+    # Notify api_keys module to reload + reset router singleton
     try:
         r = await get_redis()
         await r.publish("sp:reload_provider_keys", "updated")
     except Exception as e:
         logger.warning("Failed to publish key reload: %s", e)
+
+    # Reset StockRouter so it picks up newly enabled/disabled providers
+    from app.services.stock_router import reset_router
+    reset_router()
 
     logger.info("Provider %s updated by %s", provider.provider_name, admin.email)
 
@@ -133,7 +149,7 @@ async def test_provider(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Test provider connectivity (basic health check)."""
+    """Test provider connectivity with a real API call."""
     result = await db.execute(
         select(ProviderConfig).where(ProviderConfig.id == provider_id)
     )
@@ -141,30 +157,90 @@ async def test_provider(
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    # Basic connectivity test — will be enhanced in Phase 4 with actual provider calls
     import time
     start = time.monotonic()
 
     try:
+        # First check if API key is configured (for providers that need one)
         from app.core.api_keys import get_api_key
-        key = get_api_key(provider.provider_name)
-
-        # Providers that don't need API keys
+        key = provider.api_key or get_api_key(provider.provider_name)
         no_key_providers = {"yfinance", "akshare"}
 
-        if provider.provider_name in no_key_providers:
-            message = f"{provider.display_name} does not require an API key"
-            success = True
-        elif key:
-            message = f"API key configured for {provider.display_name}"
-            success = True
-        else:
+        if provider.provider_name not in no_key_providers and not key:
+            elapsed = int((time.monotonic() - start) * 1000)
             message = f"No API key configured for {provider.display_name}"
-            success = False
+            provider.last_health_check = datetime.now(timezone.utc)
+            provider.health_status = "error"
+            provider.error_message = message
+            return ProviderTestResult(success=False, message=message, elapsed_ms=elapsed)
 
+        # Real connectivity test: fetch a quote for a known symbol
+        from app.services.stock_router import get_stock_router
+
+        # Test symbols ordered by reliability (US/HK first, A-shares last)
+        _TEST_SYMBOLS = [
+            ("us", "AAPL"),
+            ("hk", "0700.HK"),
+            ("sh", "600519.SS"),
+            ("sz", "000858.SZ"),
+            ("metal", "GC=F"),
+        ]
+
+        sr = await get_stock_router()
+        p = sr.get_provider_by_name(provider.provider_name)
+
+        if p is None:
+            # No REST provider (e.g. Finnhub is WS-only) — fall back to key check
+            elapsed = int((time.monotonic() - start) * 1000)
+            if key:
+                message = f"API key configured for {provider.display_name} (WS-only, no REST test available)"
+                success = True
+            else:
+                message = f"No API key configured for {provider.display_name}"
+                success = False
+            provider.last_health_check = datetime.now(timezone.utc)
+            provider.health_status = "healthy" if success else "error"
+            provider.error_message = None if success else message
+            return ProviderTestResult(success=success, message=message, elapsed_ms=elapsed)
+
+        # Try the best test symbol for this provider's supported markets
+        test_symbol = None
+        test_market = None
+        for market, symbol in _TEST_SYMBOLS:
+            if market in p.supported_markets:
+                test_symbol = symbol
+                test_market = market
+                break
+
+        if not test_symbol:
+            elapsed = int((time.monotonic() - start) * 1000)
+            message = f"{provider.display_name} has no testable market"
+            provider.last_health_check = datetime.now(timezone.utc)
+            provider.health_status = "error"
+            provider.error_message = message
+            return ProviderTestResult(success=False, message=message, elapsed_ms=elapsed)
+
+        logger.info(
+            "Testing %s connectivity: get_quote(%s, %s)",
+            provider.provider_name, test_symbol, test_market,
+        )
+        data = await p.get_quote(test_symbol, test_market)
         elapsed = int((time.monotonic() - start) * 1000)
 
-        # Update health status
+        if data and data.get("price"):
+            price = data["price"]
+            message = (
+                f"{provider.display_name} OK — "
+                f"{test_symbol} = ${price:.2f} ({elapsed}ms)"
+            )
+            success = True
+        else:
+            message = (
+                f"{provider.display_name} returned no data for "
+                f"{test_symbol} ({elapsed}ms)"
+            )
+            success = False
+
         provider.last_health_check = datetime.now(timezone.utc)
         provider.health_status = "healthy" if success else "error"
         provider.error_message = None if success else message
@@ -173,6 +249,7 @@ async def test_provider(
 
     except Exception as e:
         elapsed = int((time.monotonic() - start) * 1000)
+        logger.warning("Provider test failed for %s: %s", provider.provider_name, e)
         provider.last_health_check = datetime.now(timezone.utc)
         provider.health_status = "error"
         provider.error_message = str(e)

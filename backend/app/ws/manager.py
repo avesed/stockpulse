@@ -153,14 +153,25 @@ class ConnectionManager:
             return False
 
     async def broadcast_to_symbol(self, symbol: str, event: dict[str, Any]) -> None:
-        """Send an event to all sessions subscribed to a symbol."""
+        """Send an event to all sessions subscribed to a symbol.
+
+        Respects ``provider_filter`` in session metadata: if a session
+        has a filter set (per-provider WS), only events whose ``source``
+        matches the filter are delivered.  Sessions without a filter
+        (unified ``/ws/data``) receive all events.
+        """
         sym_upper = symbol.upper()
         sids = self._symbol_subs.get(sym_upper)
         if not sids:
             return
+        event_source = event.get("source", "")
         data = serialize_event(event)
         dead: list[str] = []
         for sid in list(sids):
+            meta = self._session_meta.get(sid, {})
+            pf = meta.get("provider_filter")
+            if pf and pf != event_source:
+                continue
             if not await self._send_to(sid, data):
                 dead.append(sid)
         for sid in dead:

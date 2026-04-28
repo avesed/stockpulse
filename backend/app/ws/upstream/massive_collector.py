@@ -1,8 +1,8 @@
-"""Polygon.io WebSocket collector.
+"""Massive (formerly Polygon.io) WebSocket collector.
 
 Connects to ``wss://socket.polygon.io/stocks`` for real-time US trade data.
 
-Polygon protocol:
+Protocol:
 - Auth:        ``{"action":"auth","params":"<API_KEY>"}``
 - Subscribe:   ``{"action":"subscribe","params":"T.AAPL,T.MSFT"}``  (T. for trades)
 - Unsubscribe: ``{"action":"unsubscribe","params":"T.AAPL"}``
@@ -24,24 +24,24 @@ from app.ws.upstream.base import BaseUpstreamCollector
 logger = logging.getLogger(__name__)
 
 
-class PolygonCollector(BaseUpstreamCollector):
+class MassiveCollector(BaseUpstreamCollector):
 
     @property
     def name(self) -> str:
-        return "polygon"
+        return "massive"
 
     async def _get_ws_url(self) -> str:
         settings = get_settings()
-        return settings.POLYGON_WS_URL
+        return settings.MASSIVE_WS_URL
 
     async def _on_connected(self) -> None:
         # Authenticate first
-        api_key = get_api_key("polygon") or get_settings().POLYGON_API_KEY
+        api_key = get_api_key("massive") or get_settings().MASSIVE_API_KEY
         if not api_key:
-            raise ValueError("POLYGON_API_KEY not configured")
+            raise ValueError("MASSIVE_API_KEY not configured")
 
         await self._ws.send(orjson.dumps({"action": "auth", "params": api_key}))
-        logger.info("polygon: auth message sent")
+        logger.info("massive: auth message sent")
 
         # Subscribe after auth
         if self._symbols:
@@ -53,7 +53,7 @@ class PolygonCollector(BaseUpstreamCollector):
         else:
             messages = orjson.loads(data.encode("utf-8"))
 
-        # Polygon sends arrays of events
+        # Massive/Polygon sends arrays of events
         if not isinstance(messages, list):
             messages = [messages]
 
@@ -64,7 +64,7 @@ class PolygonCollector(BaseUpstreamCollector):
             if ev == "status":
                 status = msg.get("status")
                 message = msg.get("message", "")
-                logger.info("polygon status: %s - %s", status, message)
+                logger.info("massive status: %s - %s", status, message)
                 continue
 
             # Trade events
@@ -77,13 +77,13 @@ class PolygonCollector(BaseUpstreamCollector):
                     symbol=symbol,
                     price=price,
                     volume=volume,
-                    source="polygon",
+                    source="massive",
                 )
                 await publish_trade(event)
 
                 try:
                     from app.services.realtime_cache_service import update_quote_cache
-                    await update_quote_cache(symbol, price, volume, "polygon")
+                    await update_quote_cache(symbol, price, volume, "massive")
                 except ImportError:
                     pass
 
@@ -92,7 +92,7 @@ class PolygonCollector(BaseUpstreamCollector):
             return
         params = ",".join(f"T.{sym}" for sym in symbols)
         await self._ws.send(orjson.dumps({"action": "subscribe", "params": params}))
-        logger.info("polygon: subscribed to %d symbols", len(symbols))
+        logger.info("massive: subscribed to %d symbols", len(symbols))
 
     async def _send_unsubscribe(self, symbols: list[str]) -> None:
         if self._ws is None:

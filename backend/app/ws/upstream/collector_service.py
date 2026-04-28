@@ -24,10 +24,10 @@ def _ensure_registry() -> None:
     if _COLLECTOR_CLASSES:
         return
     from app.ws.upstream.finnhub_collector import FinnhubCollector
-    from app.ws.upstream.polygon_collector import PolygonCollector
+    from app.ws.upstream.massive_collector import MassiveCollector
     from app.ws.upstream.yfinance_collector import YFinanceCollector
     _COLLECTOR_CLASSES["finnhub"] = FinnhubCollector
-    _COLLECTOR_CLASSES["polygon"] = PolygonCollector
+    _COLLECTOR_CLASSES["massive"] = MassiveCollector
     _COLLECTOR_CLASSES["yfinance"] = YFinanceCollector
 
 

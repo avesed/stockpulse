@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     FINNHUB_API_KEY: str = ""
     TUSHARE_TOKEN: str = ""
     TIINGO_API_KEY: str = ""
-    POLYGON_API_KEY: str = ""
+    MASSIVE_API_KEY: str = ""
 
     # Server
     HOST: str = "0.0.0.0"
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
 
     # Upstream WebSocket URLs
     FINNHUB_WS_URL: str = "wss://ws.finnhub.io"
-    POLYGON_WS_URL: str = "wss://socket.polygon.io/stocks"
+    MASSIVE_WS_URL: str = "wss://socket.polygon.io/stocks"
 
     @property
     def cors_origin_list(self) -> list[str]:

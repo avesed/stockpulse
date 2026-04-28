@@ -31,7 +31,7 @@ class BaseUpstreamCollector(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Provider name (e.g. 'finnhub', 'polygon')."""
+        """Provider name (e.g. 'finnhub', 'massive')."""
 
     @abstractmethod
     async def _get_ws_url(self) -> str:
