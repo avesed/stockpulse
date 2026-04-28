@@ -33,7 +33,7 @@ stockpulse/
 │       │   └── request_logger.py  # API usage stats to Redis
 │       ├── models/                # SQLAlchemy ORM (user, api_consumer, system_setting, provider_config)
 │       ├── schemas/               # Pydantic (base/CamelModel, ApiResponse, auth, stock, market, analysis, news, content, reference)
-│       ├── providers/             # 14 data source adapters (yfinance, akshare, finnhub, tiingo, tushare, trafilatura, playwright, tavily, polygon, + news)
+│       ├── providers/             # Data source adapters (yfinance, akshare, tiingo, tushare, polygon)
 │       ├── services/              # 17 business logic services
 │       ├── api/
 │       │   ├── health.py          # GET /health (no auth)
@@ -48,9 +48,16 @@ stockpulse/
 │   ├── api/                       # Axios client with JWT interceptor
 │   ├── stores/                    # Zustand (auth, theme, toast)
 │   └── i18n/                      # en/zh translations
+│       └── ws/                    # WebSocket real-time streaming
+│           ├── protocol.py        # Message types + orjson serialization
+│           ├── auth.py            # WS auth (JWT query param / API Key)
+│           ├── manager.py         # ConnectionManager singleton
+│           ├── redis_fanout.py    # Redis pub/sub multi-worker broadcast
+│           ├── endpoints.py       # /api/v1/ws/admin, /api/v1/ws/data
+│           └── upstream/          # Upstream WS collectors (yfinance, finnhub, polygon)
 ├── docker/                        # nginx.conf, supervisord.conf, entrypoint.sh
-├── docker-compose.yml             # Production: postgres + redis + app
-├── docker-compose.dev.yml         # Dev: postgres:5433 + redis:6380 + backend:8010
+├── docker-compose.yml             # Dev: full-stack build from source
+├── docker-compose.prod.yml        # Production: ghcr.io/avesed/stockpulse:latest
 └── Dockerfile                     # Multi-stage: frontend-builder → production (supervisord)
 ```
 
@@ -80,6 +87,8 @@ stockpulse/
 | Public | `/api/v1/data/*` | X-API-Key | Stock quotes, history, news, content, analysis |
 | Internal | `/api/v1/data/internal/*` | X-API-Key | Symbols list, history batch (machine-to-machine) |
 | Admin | `/api/v1/admin/*` | JWT Bearer | Consumers, providers, collection, settings, scheduler, stats |
+| WS Admin | `/api/v1/ws/admin` | JWT (query param) | Real-time collection progress, quotes, collector control |
+| WS Data | `/api/v1/ws/data` | X-API-Key (query param) | Real-time quote subscriptions |
 
 ---
 
@@ -112,12 +121,11 @@ stockpulse/
 ## Common Commands
 
 ```bash
-# Development
-docker compose -f docker-compose.dev.yml up -d    # Start postgres + redis + backend
-cd frontend && npm run dev                          # Start frontend dev server (port 3000)
+# Development (full-stack, build from source)
+docker compose up -d --build              # postgres + redis + app on :8010
 
-# Production
-docker compose up -d --build
+# Production (pre-built image)
+docker compose -f docker-compose.prod.yml up -d   # ghcr.io/avesed/stockpulse:latest
 
 # Database
 cd backend && alembic upgrade head

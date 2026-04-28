@@ -1,6 +1,9 @@
+# Development: full-stack (postgres + redis + app with hot-reload backend)
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
     environment:
       POSTGRES_USER: stockpulse
       POSTGRES_PASSWORD: stockpulse
@@ -12,10 +15,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    mem_limit: 2g
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "6380:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes
     volumes:
       - redisdata:/data
@@ -46,12 +50,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    mem_limit: 4g
-
-  playwright-service:
-    image: mcr.microsoft.com/playwright:v1.40.0-focal
-    profiles: [playwright]
-    mem_limit: 1g
 
 volumes:
   pgdata:
