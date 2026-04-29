@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from app.core.database import get_db_pool
 from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
@@ -110,9 +111,11 @@ async def collect_market_profiles(market: str) -> dict[str, Any]:
             "Profile collection for %s: %d profiles collected", market, count,
         )
 
-        # Save to disk
+        # Save to disk + DB
         await _update_progress(market, "saving", count, count)
         _save_profiles_to_disk(market, profiles_data)
+        db_count = await _save_profiles_to_db(market, profiles_data)
+        logger.info("Profile DB upsert for %s: %d rows", market, db_count)
 
         elapsed = time.monotonic() - t0
 
@@ -184,11 +187,40 @@ async def collect_cn_concept_mapping() -> dict[str, Any]:
 
 
 async def get_market_profiles(market: str) -> Optional[list[dict[str, Any]]]:
-    """Load pre-collected profiles from disk.
+    """Load pre-collected profiles, DB-first with disk fallback.
 
     Returns:
         List of profile dicts, or ``None`` if not available.
     """
+    # Try DB first
+    try:
+        pool = get_db_pool()
+        async with pool.acquire(timeout=5) as conn:
+            rows = await conn.fetch(
+                "SELECT symbol, market, name, name_zh, sector, industry, "
+                "concepts, main_business, description "
+                "FROM stock_profiles WHERE market = $1 ORDER BY symbol",
+                market,
+            )
+        if rows:
+            return [
+                {
+                    "symbol": r["symbol"],
+                    "market": r["market"],
+                    "name": r["name"],
+                    "name_zh": r["name_zh"],
+                    "sector": r["sector"],
+                    "industry": r["industry"],
+                    "concepts": r["concepts"] if r["concepts"] else [],
+                    "main_business": r["main_business"] or "",
+                    "description": r["description"],
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.debug("DB profile read failed for %s, falling back to disk: %s", market, exc)
+
+    # Fallback to disk
     profiles_path = _DATA_DIR / market / "profiles.json"
     if not profiles_path.exists():
         return None
@@ -351,6 +383,55 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     except BaseException:
         os.unlink(tmp_path)
         raise
+
+
+async def _save_profiles_to_db(market: str, profiles: list[dict[str, Any]]) -> int:
+    """Upsert profiles to stock_profiles table."""
+    if not profiles:
+        return 0
+
+    try:
+        pool = get_db_pool()
+    except RuntimeError:
+        logger.debug("DB pool not available for profile upsert")
+        return 0
+
+    sql = (
+        "INSERT INTO stock_profiles "
+        "(symbol, market, name, name_zh, sector, industry, concepts, main_business, description, updated_at) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,NOW()) "
+        "ON CONFLICT (symbol) DO UPDATE SET "
+        "market=EXCLUDED.market, name=EXCLUDED.name, name_zh=EXCLUDED.name_zh, "
+        "sector=EXCLUDED.sector, industry=EXCLUDED.industry, concepts=EXCLUDED.concepts, "
+        "main_business=EXCLUDED.main_business, description=EXCLUDED.description, updated_at=NOW()"
+    )
+
+    count = 0
+    chunk_size = 100
+    for i in range(0, len(profiles), chunk_size):
+        chunk = profiles[i: i + chunk_size]
+        rows = []
+        for p in chunk:
+            rows.append((
+                p.get("symbol", ""),
+                market,
+                p.get("name"),
+                p.get("name_zh"),
+                p.get("sector"),
+                p.get("industry"),
+                json.dumps(p.get("concepts", []), ensure_ascii=False),
+                p.get("main_business", ""),
+                p.get("description"),
+            ))
+        try:
+            async with pool.acquire(timeout=10) as conn:
+                async with conn.transaction():
+                    await conn.executemany(sql, rows)
+            count += len(rows)
+        except Exception as exc:
+            logger.warning("Profile DB upsert chunk failed: %s", exc)
+
+    return count
 
 
 def _save_profiles_to_disk(market: str, profiles: list[dict[str, Any]]) -> None:

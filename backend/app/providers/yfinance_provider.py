@@ -398,6 +398,93 @@ class YFinanceProvider(DataProvider):
 
         return await self._cached_or_fetch("analyst_ratings", symbol, fetch)
 
+    async def get_fundamentals_bundle(
+        self, symbol: str, market: str,
+    ) -> dict[str, Any]:
+        """Fetch financials + analyst ratings in a single yf.Ticker().info call.
+
+        Returns ``{"financials": {...}|None, "analyst": {...}|None}``.
+        Used by the fundamentals collection service to avoid duplicate HTTP
+        requests (both get_financials and get_analyst_ratings call ticker.info).
+        """
+        if market == METAL:
+            return {"financials": None, "analyst": None}
+
+        try:
+            import yfinance as yf
+
+            def _fetch():
+                return yf.Ticker(symbol).info
+
+            info = await run_in_executor(_fetch)
+            if not info:
+                return {"financials": None, "analyst": None}
+
+            # --- financials ---
+            dividend_yield = info.get("dividendYield")
+            if dividend_yield is not None:
+                dividend_yield = dividend_yield / 100
+            elif info.get("payoutRatio") == 0:
+                dividend_yield = 0.0
+
+            dividend_rate = info.get("dividendRate")
+            if dividend_rate is None and info.get("payoutRatio") == 0:
+                dividend_rate = 0.0
+
+            financials = {
+                "symbol": symbol,
+                "pe_ratio": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "eps": info.get("trailingEps"),
+                "dividend_yield": dividend_yield,
+                "dividend_rate": dividend_rate,
+                "book_value": info.get("bookValue"),
+                "price_to_book": info.get("priceToBook"),
+                "revenue": info.get("totalRevenue"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "net_income": info.get("netIncomeToCommon"),
+                "profit_margin": info.get("profitMargins"),
+                "gross_margin": info.get("grossMargins"),
+                "operating_margin": info.get("operatingMargins"),
+                "roe": info.get("returnOnEquity"),
+                "roa": info.get("returnOnAssets"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "current_ratio": info.get("currentRatio"),
+                "eps_growth": info.get("earningsQuarterlyGrowth"),
+                "payout_ratio": info.get("payoutRatio"),
+                "market": market,
+                "source": "yfinance",
+            }
+
+            # --- analyst ratings ---
+            recommendation = info.get("recommendationKey")
+            target_mean = info.get("targetMeanPrice")
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+
+            analyst = None
+            if recommendation or target_mean:
+                upside_pct = None
+                if target_mean and current_price and current_price > 0:
+                    upside_pct = round(((target_mean - current_price) / current_price) * 100, 2)
+                analyst = {
+                    "symbol": symbol,
+                    "recommendation": recommendation,
+                    "recommendation_mean": info.get("recommendationMean"),
+                    "target_mean_price": target_mean,
+                    "target_high_price": info.get("targetHighPrice"),
+                    "target_low_price": info.get("targetLowPrice"),
+                    "target_median_price": info.get("targetMedianPrice"),
+                    "number_of_analysts": info.get("numberOfAnalystOpinions"),
+                    "current_price": current_price,
+                    "upside_pct": upside_pct,
+                    "source": "yfinance",
+                }
+
+            return {"financials": financials, "analyst": analyst}
+        except Exception as e:
+            logger.error("YFinance bundle error for %s: %s", symbol, e)
+            return {"financials": None, "analyst": None}
+
     async def get_technical_info(
         self, symbol: str
     ) -> Optional[Dict[str, Any]]:

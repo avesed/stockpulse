@@ -323,3 +323,32 @@ class FinnhubProvider(DataProvider):
         except Exception as e:
             logger.error("Finnhub info error for %s: %s", symbol, e)
             return None
+
+    async def get_peers(self, symbol: str) -> Optional[list[str]]:
+        """Get peer company symbols from Finnhub."""
+        if not self.is_available():
+            return None
+
+        client, key = self._get_client()
+        if not client:
+            return None
+
+        try:
+            def fetch():
+                try:
+                    return client.company_peers(symbol=symbol)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub peers error for %s: %s", symbol, e)
+                    return None
+
+            peers = await run_in_executor(fetch)
+            if not peers or not isinstance(peers, list):
+                return None
+            # Exclude self
+            return [p for p in peers if p != symbol]
+        except Exception as e:
+            logger.error("Finnhub peers error for %s: %s", symbol, e)
+            return None

@@ -15,12 +15,20 @@ from pydantic import BaseModel
 from app.core.auth import verify_api_key
 from app.schemas.base import ApiResponse
 from app.schemas.stock import (
+    AnalystRatingsData,
     BatchDailyBarsData,
     BatchDailyBarsRequest,
     FinancialsData,
+    FundHoldingsData,
     HistoryData,
     InfoData,
+    InstitutionalHoldersData,
+    InstitutionalHolderEntry,
+    NorthboundHoldingsData,
+    NorthboundHoldingEntry,
     OHLCVBar,
+    PeersData,
+    PeerStock,
     QuoteData,
     SearchItem,
     SymbolBarsResult,
@@ -350,6 +358,232 @@ async def get_financials(
         data=financials,
         source=source,
         elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/analyst-ratings/{symbol}",
+    response_model=ApiResponse[AnalystRatingsData],
+)
+async def get_analyst_ratings(
+    symbol: str,
+    market: str = Query("us"),
+):
+    """Get analyst ratings and price targets. DB-first with live fallback."""
+    t0 = time.monotonic()
+
+    # DB-first
+    from app.services.fundamentals_db_service import get_analyst_ratings_from_db
+    db_data = await get_analyst_ratings_from_db(symbol)
+
+    if db_data is not None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        return ApiResponse(
+            data=AnalystRatingsData(**db_data),
+            source="db",
+            elapsed_ms=elapsed,
+        )
+
+    # Live fallback
+    sr = await get_stock_router()
+    provider = sr.get_provider_by_name("yfinance")
+    if provider is None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        return ApiResponse(data=None, source="none", elapsed_ms=elapsed)
+
+    data = await provider.get_analyst_ratings(symbol)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None:
+        return ApiResponse(data=None, source="none", elapsed_ms=elapsed)
+
+    return ApiResponse(
+        data=AnalystRatingsData(
+            symbol=data.get("symbol", symbol),
+            recommendation=data.get("recommendation"),
+            recommendation_mean=data.get("recommendation_mean"),
+            target_mean_price=data.get("target_mean_price"),
+            target_high_price=data.get("target_high_price"),
+            target_low_price=data.get("target_low_price"),
+            target_median_price=data.get("target_median_price"),
+            number_of_analysts=data.get("number_of_analysts"),
+            current_price=data.get("current_price"),
+            upside_pct=data.get("upside_pct"),
+            market=market,
+            source=data.get("source", "yfinance"),
+        ),
+        source=data.get("source", "yfinance"),
+        elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/northbound/{symbol}",
+    response_model=ApiResponse[NorthboundHoldingsData],
+)
+async def get_northbound_holdings(
+    symbol: str,
+    days: int = Query(30, ge=1, le=365),
+):
+    """Get northbound capital flow data for CN stocks. DB-first with live fallback."""
+    t0 = time.monotonic()
+
+    # DB-first
+    from app.services.fundamentals_db_service import get_northbound_holdings_from_db
+    db_data = await get_northbound_holdings_from_db(symbol, days)
+
+    if db_data is not None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        holdings = [NorthboundHoldingEntry(**h) for h in db_data]
+        return ApiResponse(
+            data=NorthboundHoldingsData(symbol=symbol, holdings=holdings, source="db"),
+            source="db",
+            elapsed_ms=elapsed,
+        )
+
+    # Live fallback
+    from app.providers.akshare_provider import AKShareProvider
+    provider = AKShareProvider()
+    data = await provider.get_northbound_holding(symbol, days=days)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None or not data.get("holdings"):
+        return ApiResponse(
+            data=NorthboundHoldingsData(symbol=symbol, holdings=[], source="none"),
+            source="none",
+            elapsed_ms=elapsed,
+        )
+
+    holdings = []
+    for h in data["holdings"]:
+        holdings.append(NorthboundHoldingEntry(
+            date=str(h.get("holding_date", h.get("date", ""))),
+            close_price=h.get("close_price"),
+            holding_shares=h.get("holding_shares"),
+            holding_value=h.get("holding_value"),
+            holding_pct=h.get("holding_pct"),
+            change_shares=h.get("change_shares"),
+        ))
+
+    return ApiResponse(
+        data=NorthboundHoldingsData(symbol=symbol, holdings=holdings, source="akshare"),
+        source="akshare",
+        elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/institutional-holders/{symbol}",
+    response_model=ApiResponse[InstitutionalHoldersData],
+)
+async def get_institutional_holders(
+    symbol: str,
+    market: str = Query("us"),
+):
+    """Get institutional holders. DB-first with live fallback."""
+    t0 = time.monotonic()
+
+    from app.services.fundamentals_db_service import get_institutional_holders_from_db
+    db_data = await get_institutional_holders_from_db(symbol)
+
+    if db_data is not None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        holders = [InstitutionalHolderEntry(**h) for h in db_data["holders"]]
+        return ApiResponse(
+            data=InstitutionalHoldersData(
+                symbol=symbol, holders=holders,
+                total_institutional_pct=db_data.get("total_institutional_pct"),
+                source="db",
+            ),
+            source="db", elapsed_ms=elapsed,
+        )
+
+    # Live fallback
+    from app.providers.yfinance_provider import YFinanceProvider
+    provider = YFinanceProvider()
+    data = await provider.get_institutional_holders(symbol)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None or not data.get("holders"):
+        return ApiResponse(
+            data=InstitutionalHoldersData(symbol=symbol),
+            source="none", elapsed_ms=elapsed,
+        )
+
+    holders = [InstitutionalHolderEntry(**h) for h in data["holders"]]
+    return ApiResponse(
+        data=InstitutionalHoldersData(
+            symbol=symbol, holders=holders,
+            total_institutional_pct=data.get("total_institutional_pct"),
+            source="yfinance",
+        ),
+        source="yfinance", elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/fund-holdings/{symbol}",
+    response_model=ApiResponse[FundHoldingsData],
+)
+async def get_fund_holdings(symbol: str):
+    """Get fund holdings for CN stocks. DB-first with live fallback."""
+    t0 = time.monotonic()
+
+    from app.services.fundamentals_db_service import get_fund_holdings_from_db
+    db_data = await get_fund_holdings_from_db(symbol)
+
+    if db_data is not None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        return ApiResponse(data=FundHoldingsData(**db_data), source="db", elapsed_ms=elapsed)
+
+    # Live fallback
+    from app.providers.akshare_provider import AKShareProvider
+    provider = AKShareProvider()
+    data = await provider.get_fund_holdings_cn(symbol)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None or not data.get("holdings") or not isinstance(data["holdings"], dict):
+        return ApiResponse(data=FundHoldingsData(symbol=symbol), source="none", elapsed_ms=elapsed)
+
+    h = data["holdings"]
+    return ApiResponse(
+        data=FundHoldingsData(
+            symbol=symbol, quarter=data.get("quarter"),
+            institution_count=h.get("institution_count"),
+            institution_count_change=h.get("institution_count_change"),
+            holding_pct=h.get("holding_pct"), holding_pct_change=h.get("holding_pct_change"),
+            float_pct=h.get("float_pct"), float_pct_change=h.get("float_pct_change"),
+            source="akshare",
+        ),
+        source="akshare", elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/peers/{symbol}",
+    response_model=ApiResponse[PeersData],
+)
+async def get_peers(
+    symbol: str,
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Get peer stocks by industry matching from stock_profiles."""
+    t0 = time.monotonic()
+
+    from app.services.fundamentals_db_service import get_peers_from_db
+    data = await get_peers_from_db(symbol, limit)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None:
+        return ApiResponse(data=PeersData(symbol=symbol), source="none", elapsed_ms=elapsed)
+
+    peers = [PeerStock(**p) for p in data["peers"]]
+    return ApiResponse(
+        data=PeersData(
+            symbol=symbol, industry=data.get("industry"),
+            sector=data.get("sector"), peers=peers, source="db",
+        ),
+        source="db", elapsed_ms=elapsed,
     )
 
 

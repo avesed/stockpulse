@@ -90,6 +90,96 @@ class FinancialsData(BaseModel):
     source: Optional[str] = None
 
 
+class AnalystRatingsData(BaseModel):
+    """Analyst ratings and price targets."""
+
+    symbol: str
+    recommendation: Optional[str] = None
+    recommendation_mean: Optional[float] = None
+    target_mean_price: Optional[float] = None
+    target_high_price: Optional[float] = None
+    target_low_price: Optional[float] = None
+    target_median_price: Optional[float] = None
+    number_of_analysts: Optional[int] = None
+    current_price: Optional[float] = None
+    upside_pct: Optional[float] = None
+    market: str
+    source: Optional[str] = None
+
+
+class NorthboundHoldingEntry(BaseModel):
+    """Single northbound holding data point."""
+
+    date: str
+    close_price: Optional[float] = None
+    holding_shares: Optional[int] = None
+    holding_value: Optional[float] = None
+    holding_pct: Optional[float] = None
+    change_shares: Optional[float] = None
+
+
+class NorthboundHoldingsData(BaseModel):
+    """Northbound capital flow holdings for a CN stock."""
+
+    symbol: str
+    holdings: list[NorthboundHoldingEntry] = []
+    source: Optional[str] = None
+
+
+class InstitutionalHolderEntry(BaseModel):
+    """Single institutional holder record."""
+
+    holder: str
+    date_reported: Optional[str] = None
+    pct_held: Optional[float] = None
+    shares: Optional[int] = None
+    value: Optional[int] = None
+    pct_change: Optional[float] = None
+
+
+class InstitutionalHoldersData(BaseModel):
+    """Institutional holders for a stock."""
+
+    symbol: str
+    holders: list[InstitutionalHolderEntry] = []
+    total_institutional_pct: Optional[float] = None
+    source: Optional[str] = None
+
+
+class FundHoldingsData(BaseModel):
+    """Fund (mutual fund) holdings for a CN stock."""
+
+    symbol: str
+    quarter: Optional[str] = None
+    institution_count: Optional[int] = None
+    institution_count_change: Optional[int] = None
+    holding_pct: Optional[float] = None
+    holding_pct_change: Optional[float] = None
+    float_pct: Optional[float] = None
+    float_pct_change: Optional[float] = None
+    source: Optional[str] = None
+
+
+class PeerStock(BaseModel):
+    """A peer/comparable stock."""
+
+    symbol: str
+    name: Optional[str] = None
+    market: str
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+
+class PeersData(BaseModel):
+    """Peer stocks for a given symbol."""
+
+    symbol: str
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+    peers: list[PeerStock] = []
+    source: Optional[str] = None
+
+
 class SearchItem(BaseModel):
     """A single search result item."""
 

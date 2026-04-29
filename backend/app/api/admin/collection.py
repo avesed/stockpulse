@@ -209,6 +209,80 @@ async def get_progress(market: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Fundamentals collection (3 independent jobs)
+# ---------------------------------------------------------------------------
+
+_VALID_FUND_JOBS = {"financials", "analyst_ratings", "northbound", "institutional_holders", "fund_holdings"}
+_VALID_FUND_MARKETS = {"us", "hk", "cn"}
+_running_fund_tasks: dict[str, asyncio.Task] = {}
+
+
+def _cleanup_fund_task(key: str, task: asyncio.Task) -> None:
+    _running_fund_tasks.pop(key, None)
+    if task.exception():
+        logger.error("Fund task %s raised: %s", key, task.exception())
+
+
+@router.post("/fundamentals/{job_type}/{market}/collect")
+async def trigger_fund_collect(job_type: str, market: str) -> dict[str, Any]:
+    """Trigger a fundamentals sub-job (financials / analyst_ratings / northbound)."""
+    job_type = job_type.lower()
+    market = market.lower()
+    if job_type not in _VALID_FUND_JOBS:
+        raise HTTPException(status_code=400, detail=f"Unknown job: {job_type}. Use: {', '.join(sorted(_VALID_FUND_JOBS))}")
+    if market not in _VALID_FUND_MARKETS:
+        raise HTTPException(status_code=400, detail=f"Unsupported market: {market}")
+
+    task_key = f"{job_type}_{market}"
+    existing = _running_fund_tasks.get(task_key)
+    if existing is not None and not existing.done():
+        return {"status": "already_running", "jobType": job_type, "market": market}
+
+    from app.services import fundamentals_collection_service
+
+    job_fn = {
+        "financials": fundamentals_collection_service.collect_financials,
+        "analyst_ratings": fundamentals_collection_service.collect_analyst_ratings,
+        "northbound": fundamentals_collection_service.collect_northbound,
+        "institutional_holders": fundamentals_collection_service.collect_institutional_holders,
+        "fund_holdings": fundamentals_collection_service.collect_fund_holdings,
+    }[job_type]
+
+    task = asyncio.create_task(
+        job_fn(market, triggered_by="api"),
+        name=f"{job_type}_{market}",
+    )
+    task.add_done_callback(lambda t: _cleanup_fund_task(task_key, t))
+    _running_fund_tasks[task_key] = task
+
+    return {"status": "started", "jobType": job_type, "market": market}
+
+
+@router.get("/fundamentals/{job_type}/{market}/progress")
+async def get_fund_progress(job_type: str, market: str) -> dict[str, Any]:
+    """Get fundamentals sub-job progress."""
+    from app.services import fundamentals_collection_service
+
+    progress = await fundamentals_collection_service.get_progress(job_type.lower(), market.lower())
+    task_key = f"{job_type.lower()}_{market.lower()}"
+    return {
+        "jobType": job_type,
+        "market": market,
+        "progress": progress,
+        "taskRunning": task_key in _running_fund_tasks and not _running_fund_tasks[task_key].done(),
+    }
+
+
+@router.post("/fundamentals/{job_type}/{market}/unlock")
+async def force_fund_unlock(job_type: str, market: str) -> dict[str, Any]:
+    """Force-release fundamentals sub-job lock."""
+    from app.services import fundamentals_collection_service
+
+    released = await fundamentals_collection_service.force_unlock(job_type.lower(), market.lower())
+    return {"jobType": job_type, "market": market, "released": released}
+
+
+# ---------------------------------------------------------------------------
 # Collection run history (audit)
 # ---------------------------------------------------------------------------
 

@@ -41,7 +41,7 @@ async def upsert_bars(
     data_source: str,
     bars: list[dict],
 ) -> int:
-    """Insert bars using ON CONFLICT DO NOTHING, processed in chunks.
+    """Upsert bars using ON CONFLICT DO UPDATE, processed in chunks.
 
     Args:
         pool: asyncpg connection pool.
@@ -63,7 +63,9 @@ async def upsert_bars(
         "INSERT INTO stock_daily_bars "
         "(symbol, market, date, open, high, low, close, volume, data_source) "
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
-        "ON CONFLICT (symbol, date) DO NOTHING"
+        "ON CONFLICT (symbol, date) DO UPDATE SET "
+        "open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, "
+        "close = EXCLUDED.close, volume = EXCLUDED.volume, data_source = EXCLUDED.data_source"
     )
 
     for chunk_start in range(0, len(bars), INSERT_CHUNK_SIZE):
@@ -94,7 +96,7 @@ async def upsert_bars(
 
         # executemany does not return rowcount in asyncpg, so we use
         # len(rows) as an upper bound (actual inserts may be fewer due
-        # to ON CONFLICT DO NOTHING).  Wrap in an explicit transaction
+        # to ON CONFLICT DO UPDATE).  Wrap in an explicit transaction
         # so the batch is atomic.
         async with pool.acquire() as conn:
             async with conn.transaction():

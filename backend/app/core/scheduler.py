@@ -121,6 +121,61 @@ async def start_scheduler() -> None:
         **_job_kwargs,
     )
 
+    # Financials (PE/EPS/ROE) — weekly Sunday (data changes quarterly)
+    _scheduler.add_job(
+        _run_financials, CronTrigger(day_of_week="sun", hour=7, minute=0),
+        args=["cn"], id="collect_financials_cn", name="Collect CN financials",
+        **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_financials, CronTrigger(day_of_week="sun", hour=7, minute=30),
+        args=["hk"], id="collect_financials_hk", name="Collect HK financials",
+        **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_financials, CronTrigger(day_of_week="sun", hour=8, minute=0),
+        args=["us"], id="collect_financials_us", name="Collect US financials",
+        **_job_kwargs,
+    )
+
+    # Analyst ratings — daily (US/HK only, analysts update frequently)
+    _scheduler.add_job(
+        _run_analyst_ratings, CronTrigger(hour=23, minute=30),
+        args=["us"], id="collect_analyst_us", name="Collect US analyst ratings",
+        **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_analyst_ratings, CronTrigger(hour=10, minute=30),
+        args=["hk"], id="collect_analyst_hk", name="Collect HK analyst ratings",
+        **_job_kwargs,
+    )
+
+    # Northbound holdings — daily (CN only, updated each trading day)
+    _scheduler.add_job(
+        _run_northbound, CronTrigger(day_of_week="mon-fri", hour=9, minute=30),
+        id="collect_northbound", name="Collect CN northbound",
+        **_job_kwargs,
+    )
+
+    # Institutional holders — 1st of each month (quarterly data, monthly check)
+    _scheduler.add_job(
+        _run_institutional_holders, CronTrigger(day=1, hour=8, minute=0),
+        args=["us"], id="collect_inst_holders_us", name="Collect US institutional holders",
+        **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_institutional_holders, CronTrigger(day=1, hour=8, minute=30),
+        args=["hk"], id="collect_inst_holders_hk", name="Collect HK institutional holders",
+        **_job_kwargs,
+    )
+
+    # Fund holdings (CN) — 1st of each month (quarterly data)
+    _scheduler.add_job(
+        _run_fund_holdings, CronTrigger(day=1, hour=10, minute=0),
+        id="collect_fund_holdings", name="Collect CN fund holdings",
+        **_job_kwargs,
+    )
+
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
 
@@ -320,6 +375,86 @@ async def _run_profile_collection_all() -> None:
         logger.info("Scheduler: stock profile collection for all markets complete")
     except Exception as exc:
         logger.exception("Scheduler: stock profile collection failed: %s", exc)
+
+
+async def _run_financials(market: str) -> None:
+    """Scheduled job: collect financial metrics (PE/EPS/ROE). Weekly."""
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting financials collection for market=%s", market)
+    try:
+        from app.services import fundamentals_collection_service
+        result = await fundamentals_collection_service.collect_financials(market, triggered_by="scheduler")
+        logger.info(
+            "Scheduler: financials for %s complete — symbols=%d, upserted=%d, errors=%d",
+            market, result.get("symbol_count", 0), result.get("upserted", 0), len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: financials for %s failed: %s", market, exc)
+
+
+async def _run_analyst_ratings(market: str) -> None:
+    """Scheduled job: collect analyst ratings + price targets. Daily."""
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting analyst ratings for market=%s", market)
+    try:
+        from app.services import fundamentals_collection_service
+        result = await fundamentals_collection_service.collect_analyst_ratings(market, triggered_by="scheduler")
+        logger.info(
+            "Scheduler: analyst ratings for %s complete — symbols=%d, upserted=%d, errors=%d",
+            market, result.get("symbol_count", 0), result.get("upserted", 0), len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: analyst ratings for %s failed: %s", market, exc)
+
+
+async def _run_northbound() -> None:
+    """Scheduled job: collect northbound holdings. Daily (CN only)."""
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting northbound collection")
+    try:
+        from app.services import fundamentals_collection_service
+        result = await fundamentals_collection_service.collect_northbound("cn", triggered_by="scheduler")
+        logger.info(
+            "Scheduler: northbound complete — symbols=%d, upserted=%d, errors=%d",
+            result.get("symbol_count", 0), result.get("upserted", 0), len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: northbound failed: %s", exc)
+
+
+async def _run_institutional_holders(market: str) -> None:
+    """Scheduled job: collect institutional holders. Monthly."""
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting institutional holders for market=%s", market)
+    try:
+        from app.services import fundamentals_collection_service
+        result = await fundamentals_collection_service.collect_institutional_holders(market, triggered_by="scheduler")
+        logger.info(
+            "Scheduler: institutional holders for %s complete — symbols=%d, upserted=%d",
+            market, result.get("symbol_count", 0), result.get("upserted", 0),
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: institutional holders for %s failed: %s", market, exc)
+
+
+async def _run_fund_holdings() -> None:
+    """Scheduled job: collect CN fund holdings. Monthly."""
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting fund holdings collection")
+    try:
+        from app.services import fundamentals_collection_service
+        result = await fundamentals_collection_service.collect_fund_holdings("cn", triggered_by="scheduler")
+        logger.info(
+            "Scheduler: fund holdings complete — symbols=%d, upserted=%d",
+            result.get("symbol_count", 0), result.get("upserted", 0),
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: fund holdings failed: %s", exc)
 
 
 async def _run_concept_sync() -> None:
