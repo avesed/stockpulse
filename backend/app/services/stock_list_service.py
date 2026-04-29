@@ -61,7 +61,7 @@ def _fetch_finnhub_us() -> List[Dict[str, Any]]:
     """
     import finnhub
 
-    from app.core.api_keys import get_next_api_key
+    from app.core.api_keys import get_next_api_key, mark_key_rate_limited
     api_key = get_next_api_key("finnhub")
     if not api_key:
         logger.warning("Finnhub API key not configured, falling back to yfinance US stocks")
@@ -73,6 +73,8 @@ def _fetch_finnhub_us() -> List[Dict[str, Any]]:
         logger.info("Fetched %d raw US symbols from Finnhub", len(raw))
         return raw
     except Exception as e:
+        if getattr(e, "status_code", None) == 429:
+            mark_key_rate_limited("finnhub", api_key)
         logger.error("Failed to fetch US symbols from Finnhub: %s, trying yfinance fallback", e)
         return _fetch_yfinance_us_fallback()
 

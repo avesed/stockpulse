@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
-from app.core.api_keys import get_api_key, get_api_keys, get_next_api_key
+from app.core.api_keys import get_api_key, get_api_keys, get_next_api_key, mark_key_rate_limited
 from app.core.redis import cache_get, cache_set, jittered_ttl
 from app.core.executor import run_in_executor
 from app.providers.base import DataProvider
@@ -46,6 +46,17 @@ def _ttl(data_type: str) -> int:
     return jittered_ttl(base, jitter)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if an exception indicates a Finnhub 429 rate limit."""
+    # finnhub.FinnhubAPIException has status_code attribute
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    # Also check message for "API limit" as fallback
+    msg = str(exc).lower()
+    return "429" in msg or "api limit" in msg or "rate limit" in msg
+
+
 class FinnhubProvider(DataProvider):
     """Finnhub data provider for US stocks.
 
@@ -69,10 +80,11 @@ class FinnhubProvider(DataProvider):
     def is_available(cls) -> bool:
         return bool(get_api_key("finnhub"))
 
-    def _get_client(self):
+    def _get_client(self) -> tuple[Any, str] | tuple[None, None]:
+        """Return (client, api_key) tuple with rate-limit-aware key selection."""
         current_pool = get_api_keys("finnhub")
         if not current_pool:
-            return None
+            return None, None
 
         # Detect pool changes — rebuild stale clients
         if current_pool != FinnhubProvider._pool_snapshot:
@@ -81,10 +93,10 @@ class FinnhubProvider(DataProvider):
                 FinnhubProvider._clients.pop(k, None)
             FinnhubProvider._pool_snapshot = list(current_pool)
 
-        # Pick next key via round-robin
+        # Pick next key via round-robin (skips rate-limited keys)
         key = get_next_api_key("finnhub")
         if not key:
-            return None
+            return None, None
 
         if key not in FinnhubProvider._clients:
             try:
@@ -93,11 +105,11 @@ class FinnhubProvider(DataProvider):
                 logger.info("Finnhub client initialized (pool size: %d)", len(FinnhubProvider._clients))
             except ImportError:
                 logger.warning("finnhub-python package not installed")
-                return None
+                return None, None
             except Exception as e:
                 logger.error("Failed to initialize Finnhub client: %s", e)
-                return None
-        return FinnhubProvider._clients[key]
+                return None, None
+        return FinnhubProvider._clients[key], key
 
     async def get_quote(
         self, symbol: str, market: str
@@ -105,7 +117,7 @@ class FinnhubProvider(DataProvider):
         if not self.is_available() or market != US:
             return None
 
-        client = self._get_client()
+        client, key = self._get_client()
         if not client:
             return None
 
@@ -114,7 +126,10 @@ class FinnhubProvider(DataProvider):
                 try:
                     return client.quote(symbol)
                 except Exception as e:
-                    logger.warning("Finnhub quote error for %s: %s", symbol, e)
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub quote error for %s: %s", symbol, e)
                     return None
 
             q = await run_in_executor(fetch)
@@ -164,7 +179,7 @@ class FinnhubProvider(DataProvider):
             logger.debug("Finnhub doesn't support interval: %s", interval)
             return None
 
-        client = self._get_client()
+        client, key = self._get_client()
         if not client:
             return None
 
@@ -185,7 +200,10 @@ class FinnhubProvider(DataProvider):
                 try:
                     return client.stock_candles(symbol, resolution, from_ts, to_ts)
                 except Exception as e:
-                    logger.warning("Finnhub candles error for %s: %s", symbol, e)
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub candles error for %s: %s", symbol, e)
                     return None
 
             data = await run_in_executor(fetch)
@@ -228,7 +246,7 @@ class FinnhubProvider(DataProvider):
         if not self.is_available():
             return []
 
-        client = self._get_client()
+        client, key = self._get_client()
         if not client:
             return []
 
@@ -237,7 +255,10 @@ class FinnhubProvider(DataProvider):
                 try:
                     return client.symbol_lookup(query)
                 except Exception as e:
-                    logger.warning("Finnhub search error for %s: %s", query, e)
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub search error for %s: %s", query, e)
                     return None
 
             data = await run_in_executor(fetch)
@@ -263,7 +284,7 @@ class FinnhubProvider(DataProvider):
         if not self.is_available() or market != US:
             return None
 
-        client = self._get_client()
+        client, key = self._get_client()
         if not client:
             return None
 
@@ -272,7 +293,10 @@ class FinnhubProvider(DataProvider):
                 try:
                     return client.company_profile2(symbol=symbol)
                 except Exception as e:
-                    logger.warning("Finnhub profile error for %s: %s", symbol, e)
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub profile error for %s: %s", symbol, e)
                     return None
 
             data = await run_in_executor(fetch)

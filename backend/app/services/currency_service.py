@@ -105,7 +105,7 @@ async def get_exchange_rates(use_fallback: bool = True) -> Dict[str, float]:
         return cached
 
     # Fetch from Finnhub
-    from app.core.api_keys import get_next_api_key
+    from app.core.api_keys import get_next_api_key, mark_key_rate_limited
     api_key = get_next_api_key("finnhub")
     if not api_key:
         logger.warning("Finnhub API key not configured, using fallback rates")
@@ -132,6 +132,8 @@ async def get_exchange_rates(use_fallback: bool = True) -> Dict[str, float]:
         return rates
 
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            mark_key_rate_limited("finnhub", api_key)
         logger.error("Finnhub API error: %d - %s", e.response.status_code, e.response.text)
     except httpx.RequestError as e:
         logger.error("Finnhub request error: %s", e)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from app.config import get_settings
@@ -37,6 +38,20 @@ _api_key_pools: dict[str, list[str]] = {}
 # Round-robin cursor per provider (thread-safe via _rr_lock)
 _api_key_index: dict[str, int] = {}
 _rr_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Per-key rate limiting
+# ---------------------------------------------------------------------------
+# Per-minute rate limits by provider
+_RATE_LIMITS: dict[str, int] = {
+    "finnhub": 58,  # Finnhub free tier: 60/min, use 58 as safety margin
+}
+
+# key -> (count, window_start_timestamp)
+_key_usage: dict[str, tuple[int, float]] = {}
+
+# key -> cooldown-until timestamp (set when 429 received)
+_key_cooldown: dict[str, float] = {}
 
 # Callbacks invoked after keys are reloaded from DB
 _reload_callbacks: list[Callable] = []
@@ -105,24 +120,91 @@ def get_api_keys(name: str) -> list[str]:
 
 
 def get_next_api_key(name: str) -> Optional[str]:
-    """Return the next API key via round-robin.
+    """Return the next available API key via round-robin.
 
-    Thread-safe for use in executor threads.
+    Skips keys that have hit their per-minute rate limit or are in cooldown
+    (e.g. after a 429 response).  Thread-safe for use in executor threads.
     """
     keys = get_api_keys(name)
     if not keys:
         return None
-    if len(keys) == 1:
-        return keys[0]
+
+    limit = _RATE_LIMITS.get(name)
+    now = time.monotonic()
+
     with _rr_lock:
-        idx = _api_key_index.get(name, 0) % len(keys)
-        _api_key_index[name] = idx + 1
-        return keys[idx]
+        if len(keys) == 1 and not limit:
+            return keys[0]
+
+        # Try each key starting from the round-robin cursor
+        start_idx = _api_key_index.get(name, 0) % len(keys)
+        for attempt in range(len(keys)):
+            idx = (start_idx + attempt) % len(keys)
+            key = keys[idx]
+
+            if not _is_key_available(key, limit, now):
+                continue
+
+            # Found an available key — advance cursor past it
+            _api_key_index[name] = idx + 1
+            _record_usage(key, now)
+            return key
+
+        # All keys exhausted
+        logger.warning(
+            "%s: all %d API keys rate-limited, returning None",
+            name, len(keys),
+        )
+        return None
+
+
+def mark_key_rate_limited(name: str, key: str, cooldown_seconds: float = 60.0) -> None:
+    """Mark a key as rate-limited (e.g. after receiving HTTP 429).
+
+    The key will be skipped by ``get_next_api_key`` until the cooldown expires.
+    """
+    with _rr_lock:
+        until = time.monotonic() + cooldown_seconds
+        _key_cooldown[key] = until
+        logger.warning(
+            "%s: key %s...%s rate-limited, cooldown %.0fs",
+            name, key[:6], key[-4:], cooldown_seconds,
+        )
 
 
 def get_key_pool_size(name: str) -> int:
     """Return the number of API keys configured for a provider."""
     return len(get_api_keys(name))
+
+
+def _is_key_available(key: str, limit: int | None, now: float) -> bool:
+    """Check if a key is within its rate limit and not in cooldown."""
+    # Check cooldown (429 penalty)
+    cd = _key_cooldown.get(key)
+    if cd is not None:
+        if now < cd:
+            return False
+        del _key_cooldown[key]
+
+    # Check per-minute usage
+    if limit is not None:
+        count, window_start = _key_usage.get(key, (0, now))
+        if now - window_start >= 60.0:
+            # Window expired — key is available
+            return True
+        if count >= limit:
+            return False
+    return True
+
+
+def _record_usage(key: str, now: float) -> None:
+    """Record one API call for a key."""
+    count, window_start = _key_usage.get(key, (0, now))
+    if now - window_start >= 60.0:
+        # New window
+        _key_usage[key] = (1, now)
+    else:
+        _key_usage[key] = (count + 1, window_start)
 
 
 def register_reload_callback(fn: Callable) -> None:

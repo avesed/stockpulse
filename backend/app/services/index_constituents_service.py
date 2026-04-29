@@ -129,7 +129,7 @@ def _fetch_sp500_via_finnhub() -> Optional[List[str]]:
     try:
         import finnhub
 
-        from app.core.api_keys import get_next_api_key
+        from app.core.api_keys import get_next_api_key, mark_key_rate_limited
 
         api_key = get_next_api_key("finnhub")
         if not api_key:
@@ -148,6 +148,8 @@ def _fetch_sp500_via_finnhub() -> Optional[List[str]]:
         logger.info("Fetched %d S&P500 constituents via Finnhub", len(symbols))
         return sorted(set(symbols))
     except Exception as e:
+        if getattr(e, "status_code", None) == 429:
+            mark_key_rate_limited("finnhub", api_key)
         logger.info("Finnhub indices_const failed (expected on free tier): %s", e)
         return None
 
