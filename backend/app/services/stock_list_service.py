@@ -61,8 +61,8 @@ def _fetch_finnhub_us() -> List[Dict[str, Any]]:
     """
     import finnhub
 
-    from app.core.api_keys import get_api_key
-    api_key = get_api_key("finnhub")
+    from app.core.api_keys import get_next_api_key
+    api_key = get_next_api_key("finnhub")
     if not api_key:
         logger.warning("Finnhub API key not configured, falling back to yfinance US stocks")
         return _fetch_yfinance_us_fallback()

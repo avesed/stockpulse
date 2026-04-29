@@ -25,13 +25,20 @@ logger = logging.getLogger(__name__)
 
 class FinnhubCollector(BaseUpstreamCollector):
 
+    def __init__(self, *, api_key: str | None = None, instance_id: int = 0) -> None:
+        super().__init__()
+        self._explicit_key = api_key
+        self._instance_id = instance_id
+
     @property
     def name(self) -> str:
+        if self._instance_id > 0:
+            return f"finnhub-{self._instance_id}"
         return "finnhub"
 
     async def _get_ws_url(self) -> str:
         settings = get_settings()
-        api_key = get_api_key("finnhub") or settings.FINNHUB_API_KEY
+        api_key = self._explicit_key or get_api_key("finnhub") or settings.FINNHUB_API_KEY
         if not api_key:
             raise ValueError("FINNHUB_API_KEY not configured")
         return f"{settings.FINNHUB_WS_URL}?token={api_key}"

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # External API keys (env fallback; DB provider_configs takes priority)
     FINNHUB_API_KEY: str = ""
+    FINNHUB_API_KEYS: str = ""  # comma-separated multi-key, e.g. "key1,key2,key3"
     TUSHARE_TOKEN: str = ""
     TIINGO_API_KEY: str = ""
     MASSIVE_API_KEY: str = ""

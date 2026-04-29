@@ -129,9 +129,9 @@ def _fetch_sp500_via_finnhub() -> Optional[List[str]]:
     try:
         import finnhub
 
-        from app.core.api_keys import get_api_key
+        from app.core.api_keys import get_next_api_key
 
-        api_key = get_api_key("finnhub")
+        api_key = get_next_api_key("finnhub")
         if not api_key:
             return None
 

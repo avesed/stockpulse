@@ -35,6 +35,7 @@ export interface ProviderConfig {
   displayName: string
   isEnabled: boolean
   hasApiKey: boolean
+  apiKeysCount: number
   configJson: Record<string, unknown> | null
   lastHealthCheck: string | null
   healthStatus: 'healthy' | 'degraded' | 'error' | 'unknown'

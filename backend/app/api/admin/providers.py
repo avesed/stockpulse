@@ -29,6 +29,7 @@ class ProviderResponse(CamelModel):
     display_name: str
     is_enabled: bool
     has_api_key: bool = False
+    api_keys_count: int = 0
     config_json: dict | None = None
     last_health_check: datetime | None = None
     health_status: str
@@ -50,6 +51,20 @@ class ProviderTestResult(CamelModel):
     elapsed_ms: int | None = None
 
 
+# --- Helpers ---
+
+def _count_api_keys(provider: ProviderConfig) -> int:
+    """Count total API keys (primary + extras in config_json)."""
+    if not provider.api_key:
+        return 0
+    count = 1
+    if isinstance(provider.config_json, dict):
+        extras = provider.config_json.get("extra_api_keys")
+        if isinstance(extras, list):
+            count += len([k for k in extras if isinstance(k, str) and k.strip()])
+    return count
+
+
 # --- Endpoints ---
 
 @router.get("", response_model=list[ProviderResponse])
@@ -68,6 +83,7 @@ async def list_providers(
             display_name=p.display_name,
             is_enabled=p.is_enabled,
             has_api_key=bool(p.api_key),
+            api_keys_count=_count_api_keys(p),
             config_json=p.config_json,
             last_health_check=p.last_health_check,
             health_status=p.health_status,
@@ -134,6 +150,7 @@ async def update_provider(
         display_name=provider.display_name,
         is_enabled=provider.is_enabled,
         has_api_key=bool(provider.api_key),
+        api_keys_count=_count_api_keys(provider),
         config_json=provider.config_json,
         last_health_check=provider.last_health_check,
         health_status=provider.health_status,

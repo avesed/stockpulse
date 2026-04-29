@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
-from app.core.api_keys import get_api_key
+from app.core.api_keys import get_api_key, get_api_keys, get_next_api_key
 from app.core.redis import cache_get, cache_set, jittered_ttl
 from app.core.executor import run_in_executor
 from app.providers.base import DataProvider
@@ -49,11 +49,13 @@ def _ttl(data_type: str) -> int:
 class FinnhubProvider(DataProvider):
     """Finnhub data provider for US stocks.
 
-    Requires FINNHUB_API_KEY setting.
+    Requires FINNHUB_API_KEY setting.  Supports multiple keys with
+    round-robin rotation for load balancing across free-tier limits.
     """
 
-    _client = None
-    _client_key: str | None = None
+    # Client pool: api_key -> finnhub.Client
+    _clients: Dict[str, Any] = {}
+    _pool_snapshot: list[str] = []
 
     @property
     def name(self) -> str:
@@ -68,27 +70,34 @@ class FinnhubProvider(DataProvider):
         return bool(get_api_key("finnhub"))
 
     def _get_client(self):
-        current_key = get_api_key("finnhub")
-        if not current_key:
+        current_pool = get_api_keys("finnhub")
+        if not current_pool:
             return None
 
-        if FinnhubProvider._client is not None and FinnhubProvider._client_key != current_key:
-            logger.info("Finnhub API key changed, rebuilding client")
-            FinnhubProvider._client = None
+        # Detect pool changes — rebuild stale clients
+        if current_pool != FinnhubProvider._pool_snapshot:
+            stale = set(FinnhubProvider._clients.keys()) - set(current_pool)
+            for k in stale:
+                FinnhubProvider._clients.pop(k, None)
+            FinnhubProvider._pool_snapshot = list(current_pool)
 
-        if FinnhubProvider._client is None:
+        # Pick next key via round-robin
+        key = get_next_api_key("finnhub")
+        if not key:
+            return None
+
+        if key not in FinnhubProvider._clients:
             try:
                 import finnhub
-                FinnhubProvider._client = finnhub.Client(api_key=current_key)
-                FinnhubProvider._client_key = current_key
-                logger.info("Finnhub client initialized")
+                FinnhubProvider._clients[key] = finnhub.Client(api_key=key)
+                logger.info("Finnhub client initialized (pool size: %d)", len(FinnhubProvider._clients))
             except ImportError:
                 logger.warning("finnhub-python package not installed")
                 return None
             except Exception as e:
                 logger.error("Failed to initialize Finnhub client: %s", e)
                 return None
-        return FinnhubProvider._client
+        return FinnhubProvider._clients[key]
 
     async def get_quote(
         self, symbol: str, market: str

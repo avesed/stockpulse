@@ -23,10 +23,10 @@ def _ensure_registry() -> None:
     """Lazily populate the collector class registry."""
     if _COLLECTOR_CLASSES:
         return
-    from app.ws.upstream.finnhub_collector import FinnhubCollector
+    from app.ws.upstream.finnhub_orchestrator import FinnhubOrchestrator
     from app.ws.upstream.massive_collector import MassiveCollector
     from app.ws.upstream.yfinance_collector import YFinanceCollector
-    _COLLECTOR_CLASSES["finnhub"] = FinnhubCollector
+    _COLLECTOR_CLASSES["finnhub"] = FinnhubOrchestrator
     _COLLECTOR_CLASSES["massive"] = MassiveCollector
     _COLLECTOR_CLASSES["yfinance"] = YFinanceCollector
 
