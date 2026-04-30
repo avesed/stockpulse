@@ -324,6 +324,116 @@ class FinnhubProvider(DataProvider):
             logger.error("Finnhub info error for %s: %s", symbol, e)
             return None
 
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Finnhub news. US-only.
+
+        - With ``symbol``: ``company_news(symbol, _from, to)``
+        - Without ``symbol``: ``general_news('general')``
+        """
+        if not self.is_available():
+            return []
+        if market and market != US:
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        end_dt = datetime.utcnow()
+        # Default 90 days — Finnhub company_news *requires* from/to, and a
+        # tight default starves coverage for less-popular tickers. 90d is
+        # still bounded by the per-call ``limit`` cap, so worst-case payload
+        # size doesn't change.
+        _DEFAULT_LOOKBACK = timedelta(days=90)
+        if since:
+            try:
+                start_dt = datetime.fromisoformat(
+                    since.replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+            except Exception:
+                start_dt = end_dt - _DEFAULT_LOOKBACK
+        else:
+            start_dt = end_dt - _DEFAULT_LOOKBACK
+
+        try:
+            if symbol:
+                def _fetch_sym():
+                    try:
+                        return client.company_news(
+                            symbol,
+                            _from=start_dt.strftime("%Y-%m-%d"),
+                            to=end_dt.strftime("%Y-%m-%d"),
+                        )
+                    except Exception as e:
+                        if _is_rate_limit_error(e):
+                            mark_key_rate_limited("finnhub", key)
+                        else:
+                            logger.warning(
+                                "Finnhub company_news error for %s: %s",
+                                symbol, e,
+                            )
+                        return None
+
+                items = await run_in_executor(_fetch_sym)
+            else:
+                def _fetch_global():
+                    try:
+                        return client.general_news("general", min_id=0)
+                    except Exception as e:
+                        if _is_rate_limit_error(e):
+                            mark_key_rate_limited("finnhub", key)
+                        else:
+                            logger.warning(
+                                "Finnhub general_news error: %s", e,
+                            )
+                        return None
+
+                items = await run_in_executor(_fetch_global)
+
+            if not items:
+                return []
+
+            out: List[Dict[str, Any]] = []
+            for it in items[:limit]:
+                ts = it.get("datetime")
+                pub_iso = (
+                    datetime.utcfromtimestamp(ts).isoformat() + "Z"
+                    if isinstance(ts, (int, float))
+                    else None
+                )
+                related = it.get("related") or ""
+                symbols = (
+                    [s.strip() for s in related.split(",") if s.strip()]
+                    if isinstance(related, str)
+                    else []
+                )
+                if symbol and symbol not in symbols:
+                    symbols = [symbol] + symbols
+
+                out.append({
+                    "source": "finnhub",
+                    "id": str(it.get("id")) if it.get("id") is not None else None,
+                    "title": it.get("headline") or "",
+                    "summary": it.get("summary"),
+                    "url": it.get("url"),
+                    "publisher": it.get("source"),
+                    "published_at": pub_iso,
+                    "symbols": symbols,
+                    "image_url": it.get("image") or None,
+                    "language": "en",
+                    "raw": it,
+                })
+            return out
+        except Exception as e:
+            logger.error("Finnhub news error for %s: %s", symbol, e)
+            return []
+
     async def get_peers(self, symbol: str) -> Optional[list[str]]:
         """Get peer company symbols from Finnhub."""
         if not self.is_available():

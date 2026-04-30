@@ -1576,3 +1576,153 @@ class AKShareProvider(DataProvider):
         return await self._cached_or_fetch(
             "hk_history", f"{code}:{days}", fetch
         )
+
+    # ------------------------------------------------------------------
+    # News
+    # ------------------------------------------------------------------
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """News from akshare.
+
+        - Per-symbol (A-share): ``stock_news_em(symbol=...)``
+        - Global (A-share market-wide): ``stock_zh_a_alerts_cls()`` —
+          财联社电报, returned when ``symbol`` is None.
+
+        HK / US not supported via akshare news endpoints.
+        """
+        try:
+            import akshare as ak
+            from datetime import datetime as _dt
+
+            since_ts: Optional[float] = None
+            if since:
+                try:
+                    since_ts = _dt.fromisoformat(
+                        since.replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    since_ts = None
+
+            if symbol:
+                # Strip exchange suffix; ak.stock_news_em expects bare 6-digit code
+                code = normalize_symbol(symbol, market or SH)
+
+                def _fetch_sym():
+                    try:
+                        return ak.stock_news_em(symbol=code)
+                    except Exception as exc:
+                        logger.warning(
+                            "akshare stock_news_em(%s) failed: %s", code, exc,
+                        )
+                        return None
+
+                df = await run_in_executor(_fetch_sym)
+                if df is None or df.empty:
+                    return []
+
+                out: List[Dict[str, Any]] = []
+                for _, row in df.head(limit).iterrows():
+                    pub = row.get("发布时间")  # 发布时间
+                    pub_iso = None
+                    if pd.notna(pub):
+                        try:
+                            pub_iso = pd.to_datetime(pub).isoformat()
+                        except Exception:
+                            pub_iso = str(pub)
+
+                    if since_ts and pub_iso:
+                        try:
+                            if pd.to_datetime(pub_iso).timestamp() < since_ts:
+                                continue
+                        except Exception:
+                            pass
+
+                    raw = {k: (None if pd.isna(v) else v) for k, v in row.items()}
+                    out.append({
+                        "source": "akshare",
+                        "id": None,
+                        "title": str(row.get("新闻标题") or ""),
+                        "summary": (
+                            str(row.get("新闻内容"))
+                            if pd.notna(row.get("新闻内容"))
+                            else None
+                        ),
+                        "url": (
+                            str(row.get("新闻链接"))
+                            if pd.notna(row.get("新闻链接"))
+                            else None
+                        ),
+                        "publisher": (
+                            str(row.get("文章来源"))
+                            if pd.notna(row.get("文章来源"))
+                            else "东方财富"
+                        ),
+                        "published_at": pub_iso,
+                        "symbols": [symbol],
+                        "image_url": None,
+                        "language": "zh",
+                        "raw": raw,
+                    })
+                return out
+
+            # Global: 财联社电报
+            def _fetch_global():
+                try:
+                    return ak.stock_info_global_cls()
+                except Exception as exc:
+                    logger.warning(
+                        "akshare stock_info_global_cls failed: %s", exc,
+                    )
+                    return None
+
+            df = await run_in_executor(_fetch_global)
+            if df is None or df.empty:
+                return []
+
+            out2: List[Dict[str, Any]] = []
+            for _, row in df.head(limit).iterrows():
+                date_v = row.get("发布日期")  # 发布日期
+                time_v = row.get("发布时间")  # 发布时间
+                pub_iso = None
+                try:
+                    if pd.notna(date_v) and pd.notna(time_v):
+                        pub_iso = pd.to_datetime(
+                            f"{date_v} {time_v}"
+                        ).isoformat()
+                except Exception:
+                    pub_iso = None
+
+                if since_ts and pub_iso:
+                    try:
+                        if pd.to_datetime(pub_iso).timestamp() < since_ts:
+                            continue
+                    except Exception:
+                        pass
+
+                raw = {k: (None if pd.isna(v) else v) for k, v in row.items()}
+                out2.append({
+                    "source": "akshare",
+                    "id": None,
+                    "title": str(row.get("标题") or ""),
+                    "summary": (
+                        str(row.get("内容"))
+                        if pd.notna(row.get("内容"))
+                        else None
+                    ),
+                    "url": None,
+                    "publisher": "财联社",
+                    "published_at": pub_iso,
+                    "symbols": [],
+                    "image_url": None,
+                    "language": "zh",
+                    "raw": raw,
+                })
+            return out2
+        except Exception as e:
+            logger.warning("akshare news error: %s", e)
+            return []

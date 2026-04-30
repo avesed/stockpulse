@@ -98,3 +98,28 @@ class DataProvider(ABC):
     ) -> Optional[Dict[str, Any]]:
         """Get pre-calculated technical data (SMA, ADTV, beta). Optional."""
         return None
+
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Get news articles. Pass-through, no dedup.
+
+        Args:
+            symbol: Per-symbol news. If None, fetch global/market-wide feed.
+            market: Market hint (us/hk/sh/sz). Providers may ignore.
+            since: ISO 8601 lower bound (inclusive). Providers may ignore.
+            limit: Max items to return.
+
+        Returns:
+            List of dicts with at minimum:
+              {source, title, url, published_at}
+            and optionally: id, symbols, summary, publisher, image_url,
+            language, raw.
+
+            Empty list = no news / not supported / error.
+        """
+        return []

@@ -127,6 +127,7 @@ from app.api.public.market import router as market_router  # noqa: E402
 from app.api.public.analysis import router as analysis_router  # noqa: E402
 from app.api.public.reference import router as reference_router  # noqa: E402
 from app.api.public.internal import router as internal_router  # noqa: E402
+from app.api.public.news import router as news_router  # noqa: E402
 
 # Admin collection router (JWT auth)
 from app.api.admin.collection import router as collection_router  # noqa: E402
@@ -144,6 +145,7 @@ app.include_router(market_router)
 app.include_router(analysis_router)
 app.include_router(reference_router)
 app.include_router(internal_router)
+app.include_router(news_router)
 app.include_router(collection_router)
 
 # Per-provider data API routers (X-API-Key auth, direct provider access)

@@ -664,6 +664,110 @@ class YFinanceProvider(DataProvider):
             for name, result in zip(tasks.keys(), results)
         }
 
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Per-symbol news from yfinance. No global feed.
+
+        yfinance returns items in two possible shapes (legacy + 0.2.x).
+        We map both into the common schema and pass the original under
+        ``raw``.
+        """
+        if not symbol:
+            return []
+
+        try:
+            import yfinance as yf
+            from datetime import datetime as _dt
+
+            def _fetch():
+                return yf.Ticker(symbol).news or []
+
+            items = await run_in_executor(_fetch)
+            if not items:
+                return []
+
+            since_ts: Optional[float] = None
+            if since:
+                try:
+                    since_ts = _dt.fromisoformat(
+                        since.replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    since_ts = None
+
+            out: List[Dict[str, Any]] = []
+            for it in items[:limit]:
+                content = it.get("content") if isinstance(it, dict) else None
+
+                if isinstance(content, dict):
+                    # Modern shape (yfinance 0.2.x)
+                    canonical = content.get("canonicalUrl") or {}
+                    click = content.get("clickThroughUrl") or {}
+                    thumb = content.get("thumbnail") or {}
+                    resolutions = thumb.get("resolutions") or []
+                    image_url = resolutions[0].get("url") if resolutions else None
+                    provider = (content.get("provider") or {}).get("displayName")
+                    pub = content.get("pubDate") or content.get("displayTime")
+
+                    title = content.get("title") or ""
+                    summary = content.get("summary") or content.get("description")
+                    url = canonical.get("url") or click.get("url")
+                    nid = content.get("id") or it.get("id")
+                else:
+                    # Legacy shape
+                    title = it.get("title", "")
+                    summary = None
+                    url = it.get("link")
+                    provider = it.get("publisher")
+                    ts = it.get("providerPublishTime")
+                    pub = (
+                        _dt.utcfromtimestamp(ts).isoformat() + "Z"
+                        if isinstance(ts, (int, float))
+                        else None
+                    )
+                    image_url = None
+                    nid = it.get("uuid")
+
+                # since filter
+                if since_ts and pub:
+                    try:
+                        item_ts = _dt.fromisoformat(
+                            str(pub).replace("Z", "+00:00")
+                        ).timestamp()
+                        if item_ts < since_ts:
+                            continue
+                    except Exception:
+                        pass
+
+                related = (
+                    content.get("relatedTickers")
+                    if isinstance(content, dict)
+                    else it.get("relatedTickers")
+                ) or []
+
+                out.append({
+                    "source": "yfinance",
+                    "id": nid,
+                    "title": title,
+                    "summary": summary,
+                    "url": url,
+                    "publisher": provider,
+                    "published_at": pub,
+                    "symbols": [s for s in related if isinstance(s, str)] or [symbol],
+                    "image_url": image_url,
+                    "language": "en",
+                    "raw": it if isinstance(it, dict) else None,
+                })
+            return out
+        except Exception as e:
+            logger.warning("YFinance news error for %s: %s", symbol, e)
+            return []
+
     async def get_sector_industry(
         self, symbol: str
     ) -> Optional[Dict[str, Any]]:

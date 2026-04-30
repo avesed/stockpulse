@@ -143,3 +143,93 @@ class TushareProvider(DataProvider):
     ) -> List[Dict[str, Any]]:
         """Search not implemented for Tushare fallback."""
         return []
+
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Tushare global news (``pro.news`` from sina/eastmoney).
+
+        Tushare doesn't expose per-symbol news in the basic API, so the
+        symbol arg is ignored. Requires sufficient积分; on insufficient
+        permissions or any error we return an empty list silently.
+        """
+        if not self.is_available():
+            return []
+
+        try:
+            import tushare as ts
+
+            ts.set_token(self._token)
+            pro = ts.pro_api()
+
+            end_dt = datetime.now()
+            if since:
+                try:
+                    start_dt = datetime.fromisoformat(
+                        since.replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                except Exception:
+                    start_dt = end_dt - timedelta(days=2)
+            else:
+                start_dt = end_dt - timedelta(days=2)
+
+            def _fetch():
+                try:
+                    return pro.news(
+                        src="sina",
+                        start_date=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        end_date=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                except Exception as exc:
+                    logger.warning("Tushare news error: %s", exc)
+                    return None
+
+            df = await run_in_executor(_fetch)
+            if df is None or df.empty:
+                return []
+
+            out: List[Dict[str, Any]] = []
+            for _, row in df.head(limit).iterrows():
+                pub = row.get("datetime")
+                pub_iso = None
+                if pub is not None:
+                    try:
+                        from pandas import to_datetime as _to_dt, isna as _isna
+                        if not _isna(pub):
+                            pub_iso = _to_dt(pub).isoformat()
+                    except Exception:
+                        pub_iso = str(pub)
+
+                raw = {}
+                for k, v in row.items():
+                    try:
+                        from pandas import isna as _isna
+                        raw[k] = None if _isna(v) else v
+                    except Exception:
+                        raw[k] = v
+
+                out.append({
+                    "source": "tushare",
+                    "id": None,
+                    "title": str(row.get("title") or row.get("content", "")[:80] or ""),
+                    "summary": (
+                        str(row.get("content"))
+                        if row.get("content") is not None
+                        else None
+                    ),
+                    "url": None,
+                    "publisher": str(row.get("channels") or "sina"),
+                    "published_at": pub_iso,
+                    "symbols": [],
+                    "image_url": None,
+                    "language": "zh",
+                    "raw": raw,
+                })
+            return out
+        except Exception as e:
+            logger.warning("Tushare news error: %s", e)
+            return []

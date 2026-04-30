@@ -347,3 +347,90 @@ class MassiveProvider(DataProvider):
             return await run_in_executor(_fetch_sync)
 
         return await self._cached_or_fetch("info", symbol, fetch)
+
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Polygon (massive) news via ``client.list_ticker_news``.
+
+        US-only. Without a symbol, returns the global ticker-news feed.
+        """
+        if not self.is_available():
+            return []
+        if market and market != US:
+            return []
+
+        client = self._get_client()
+        if not client:
+            return []
+
+        try:
+            kwargs: Dict[str, Any] = {"limit": min(limit, 1000)}
+            if symbol:
+                kwargs["ticker"] = symbol
+            if since:
+                kwargs["published_utc_gte"] = since[:10]
+
+            def _fetch():
+                try:
+                    out: List[Any] = []
+                    for n in client.list_ticker_news(**kwargs):
+                        out.append(n)
+                        if len(out) >= limit:
+                            break
+                    return out
+                except Exception as e:
+                    logger.warning("Massive news error: %s", e)
+                    return None
+
+            items = await run_in_executor(_fetch)
+            if not items:
+                return []
+
+            out: List[Dict[str, Any]] = []
+            for n in items:
+                publisher = getattr(n, "publisher", None)
+                pub_name = getattr(publisher, "name", None) if publisher else None
+                tickers = list(getattr(n, "tickers", None) or [])
+                raw = {
+                    "id": getattr(n, "id", None),
+                    "title": getattr(n, "title", None),
+                    "author": getattr(n, "author", None),
+                    "published_utc": getattr(n, "published_utc", None),
+                    "article_url": getattr(n, "article_url", None),
+                    "tickers": tickers,
+                    "amp_url": getattr(n, "amp_url", None),
+                    "image_url": getattr(n, "image_url", None),
+                    "description": getattr(n, "description", None),
+                    "keywords": list(getattr(n, "keywords", None) or []),
+                    "publisher": (
+                        {
+                            "name": pub_name,
+                            "homepage_url": getattr(publisher, "homepage_url", None),
+                            "logo_url": getattr(publisher, "logo_url", None),
+                            "favicon_url": getattr(publisher, "favicon_url", None),
+                        }
+                        if publisher else None
+                    ),
+                }
+                out.append({
+                    "source": "massive",
+                    "id": str(getattr(n, "id", "") or "") or None,
+                    "title": getattr(n, "title", "") or "",
+                    "summary": getattr(n, "description", None),
+                    "url": getattr(n, "article_url", None),
+                    "publisher": pub_name,
+                    "published_at": getattr(n, "published_utc", None),
+                    "symbols": [str(t).upper() for t in tickers],
+                    "image_url": getattr(n, "image_url", None),
+                    "language": "en",
+                    "raw": raw,
+                })
+            return out
+        except Exception as e:
+            logger.error("Massive news error: %s", e)
+            return []

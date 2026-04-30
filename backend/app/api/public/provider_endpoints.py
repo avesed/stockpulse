@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.auth import verify_api_key
 from app.schemas.base import ApiResponse
+from app.schemas.news import NewsItem
 from app.schemas.stock import (
     FinancialsData,
     HistoryData,
@@ -289,6 +290,41 @@ def create_provider_router(provider_name: str) -> APIRouter:
         logger.debug(
             "%s/search?q=%s: %d results elapsed=%dms",
             provider_name, q, len(items), elapsed,
+        )
+        return ApiResponse(
+            data=items,
+            source=provider_name,
+            elapsed_ms=elapsed,
+        )
+
+    @router.get("/news", response_model=ApiResponse[list[NewsItem]])
+    async def get_news(
+        symbol: Optional[str] = Query(None),
+        market: Optional[str] = Query(None),
+        since: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+    ):
+        """Get news directly from {provider_name} (pass-through)."""
+        t0 = time.monotonic()
+        sr = await get_stock_router()
+        provider = sr.get_provider_by_name(provider_name)
+        if provider is None:
+            elapsed = int((time.monotonic() - t0) * 1000)
+            return ApiResponse(
+                success=False,
+                error=f"Provider '{provider_name}' is not available",
+                elapsed_ms=elapsed,
+            )
+
+        items_raw = await provider.get_news(
+            symbol=symbol, market=market, since=since, limit=limit,
+        )
+        elapsed = int((time.monotonic() - t0) * 1000)
+        items = [NewsItem(**it) for it in (items_raw or [])]
+
+        logger.debug(
+            "%s/news symbol=%s market=%s items=%d elapsed=%dms",
+            provider_name, symbol, market, len(items), elapsed,
         )
         return ApiResponse(
             data=items,

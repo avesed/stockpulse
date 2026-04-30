@@ -438,6 +438,73 @@ class StockRouter:
         """Get HK stock history with yfinance fallback (delegated to akshare)."""
         return await self._akshare.get_hk_stock_history(symbol, days=days)
 
+    # === News fan-out ===
+
+    async def get_news_fanout(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Pass-through fan-out: call every eligible provider in parallel
+        and concatenate results. No dedup — downstream (NewsForge) owns it.
+
+        Eligibility:
+        - If ``symbol`` given, ``market`` is auto-detected (unless explicit).
+          Only providers whose ``supported_markets`` contains that market
+          run, plus akshare/tushare for zh-language global feed when applicable.
+        - If no ``symbol``, every available provider runs against its global
+          feed (those that don't have a global feed return []).
+        """
+        if symbol and market is None:
+            market = detect_market(symbol)
+
+        # Build candidate provider list
+        candidates: List[DataProvider] = []
+        if market:
+            for p in (
+                self._yfinance, self._akshare, self._tushare,
+                self._tiingo, self._massive, self._finnhub,
+            ):
+                if p is None:
+                    continue
+                if not p.is_available():
+                    continue
+                if p.supports_market(market):
+                    candidates.append(p)
+        else:
+            for p in (
+                self._yfinance, self._akshare, self._tushare,
+                self._tiingo, self._massive, self._finnhub,
+            ):
+                if p is None:
+                    continue
+                if not p.is_available():
+                    continue
+                candidates.append(p)
+
+        if not candidates:
+            return []
+
+        async def _run(p: DataProvider) -> List[Dict[str, Any]]:
+            try:
+                return await p.get_news(
+                    symbol=symbol, market=market, since=since, limit=limit,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "news fan-out: %s failed: %s", p.name, exc,
+                )
+                return []
+
+        results = await asyncio.gather(*(_run(p) for p in candidates))
+        merged: List[Dict[str, Any]] = []
+        for r in results:
+            if r:
+                merged.extend(r)
+        return merged
+
 
 # ---------------------------------------------------------------------------
 # Singleton instance management

@@ -558,3 +558,76 @@ class TiingoProvider(DataProvider):
         return await self._cached_or_fetch(
             "fundamentals_statements", symbol, fetch
         )
+
+    async def get_news(
+        self,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Tiingo news via REST: ``GET /tiingo/news``.
+
+        Works for global or per-symbol (US). HK / A-share unsupported.
+        """
+        if not self.is_available():
+            return []
+        if market and market != US:
+            return []
+
+        try:
+            import requests
+
+            params: Dict[str, Any] = {
+                "token": self._api_key,
+                "limit": min(limit, 100),
+            }
+            if symbol:
+                params["tickers"] = symbol
+            if since:
+                # Tiingo accepts YYYY-MM-DD
+                params["startDate"] = since[:10]
+
+            def _fetch():
+                try:
+                    r = requests.get(
+                        "https://api.tiingo.com/tiingo/news",
+                        params=params,
+                        timeout=10,
+                    )
+                    if r.status_code != 200:
+                        logger.warning(
+                            "Tiingo news http %d: %s",
+                            r.status_code, r.text[:200],
+                        )
+                        return None
+                    return r.json()
+                except Exception as exc:
+                    logger.warning("Tiingo news fetch error: %s", exc)
+                    return None
+
+            items = await run_in_executor(_fetch)
+            if not items:
+                return []
+
+            out: List[Dict[str, Any]] = []
+            for it in items[:limit]:
+                tickers = it.get("tickers") or []
+                tickers_upper = [str(t).upper() for t in tickers]
+                out.append({
+                    "source": "tiingo",
+                    "id": str(it.get("id")) if it.get("id") is not None else None,
+                    "title": it.get("title") or "",
+                    "summary": it.get("description"),
+                    "url": it.get("url"),
+                    "publisher": it.get("source"),
+                    "published_at": it.get("publishedDate"),
+                    "symbols": tickers_upper,
+                    "image_url": None,
+                    "language": "en",
+                    "raw": it,
+                })
+            return out
+        except Exception as e:
+            logger.error("Tiingo news error: %s", e)
+            return []
