@@ -78,3 +78,24 @@ async def trigger_job(
 
     logger.info("Admin %s triggered job %s", admin.email, job_id)
     return {"status": "triggered", "job_id": job_id, "job_name": job.name}
+
+
+@router.post("/restart")
+async def restart_scheduler(admin: User = Depends(require_admin)):
+    """Force this worker to drop leadership and trigger re-election.
+
+    Used to recover when the scheduler is wedged or to migrate
+    leadership between workers without a process restart.
+    """
+    from app.core.scheduler import is_leader, request_relinquish
+
+    was_leader = is_leader()
+    await request_relinquish()
+    logger.info(
+        "Admin %s requested scheduler restart (was_leader=%s)",
+        admin.email, was_leader,
+    )
+    return {
+        "status": "relinquished" if was_leader else "noop",
+        "was_leader": was_leader,
+    }

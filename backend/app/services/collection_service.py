@@ -46,6 +46,12 @@ _PROGRESS_TTL = 3600  # 1 hour
 
 _COUNTER_KEY_TEMPLATE = "sp:counters:daily_bars:{market}"
 
+# Per-day checkpoint set: symbols already processed in today's collection.
+# TTL = 36h so a job that starts late on UTC day N still benefits from a
+# resume on day N+0:23.  Cleared on rebuild.
+_CHECKPOINT_KEY_TEMPLATE = "sp:daily_bars:{market}:processed:{day}"
+_CHECKPOINT_TTL = 36 * 3600
+
 # Batch sizes (match backend DailyBarService constants)
 _CN_BATCH_SIZE = 36
 _YF_BATCH_SIZE = 50
@@ -111,20 +117,58 @@ async def collect_market(
                 await collection_run_service.fail_run(run_id, "No symbols found")
             return {"symbol_count": 0, "new_bars": 0, "errors": ["No symbols"]}
 
-        logger.info(
-            "Collection started: market=%s, symbols=%d", market, len(symbols),
-        )
-        await _update_progress(market, 0, len(symbols), 0, started_at=started_at, error_count=0)
-
-        # 2. Query latest dates from DB
+        # 2. Query latest dates from DB.  This is the durable source of
+        # truth: any symbol with last_date >= today is functionally
+        # "done" for today regardless of Redis state.
         pool = get_db_pool()
         latest_dates = await bar_persistence_service.get_latest_dates(pool, market)
+        today = date.today()
+
+        # Build resume set from two sources (DB durable + Redis volatile),
+        # so a Redis wipe self-heals: DB-derived members are always present,
+        # and we re-seed them into Redis for downstream consistency.
+        processed_from_db = {
+            sym for sym, d in latest_dates.items() if d is not None and d >= today
+        }
+        processed_from_redis = await _checkpoint_load(market, today)
+        if processed_from_db - processed_from_redis:
+            await _checkpoint_add(
+                market, today, list(processed_from_db - processed_from_redis),
+            )
+        processed = processed_from_db | processed_from_redis
+
+        resume_skipped = 0
+        if processed:
+            before = len(symbols)
+            symbols = [s for s in symbols if s not in processed]
+            resume_skipped = before - len(symbols)
+            logger.info(
+                "Resume: market=%s skipped=%d (db=%d, redis=%d), remaining=%d",
+                market, resume_skipped,
+                len(processed_from_db), len(processed_from_redis),
+                len(symbols),
+            )
+
+        logger.info(
+            "Collection started: market=%s, symbols=%d (resume_skipped=%d)",
+            market, len(symbols), resume_skipped,
+        )
+        await _update_progress(
+            market, resume_skipped, resume_skipped + len(symbols), 0,
+            started_at=started_at, error_count=0,
+        )
 
         # 3. Fetch + upsert
         if market == "cn":
-            result = await _collect_cn(market, symbols, latest_dates, started_at)
+            result = await _collect_cn(
+                market, symbols, latest_dates, started_at,
+                checkpoint_day=today, resume_skipped=resume_skipped,
+            )
         else:
-            result = await _collect_yf(market, symbols, latest_dates, started_at)
+            result = await _collect_yf(
+                market, symbols, latest_dates, started_at,
+                checkpoint_day=today, resume_skipped=resume_skipped,
+            )
 
         logger.info(
             "Collection complete: market=%s, symbols=%d, new_bars=%d, errors=%d",
@@ -165,6 +209,10 @@ async def collect_market(
     finally:
         await _rebuild_counter(market)
         await _clear_progress(market)
+        # Successful or graceful return: drop today's checkpoint so a
+        # manual re-run starts fresh.  If we crashed without reaching
+        # this finally (e.g. SIGKILL), the 36h TTL takes over.
+        await _checkpoint_clear(market, date.today())
         await _release_lock(market, owner)
 
 
@@ -203,8 +251,9 @@ async def rebuild_market(
     try:
         pool = get_db_pool()
 
-        # Phase 1: Delete existing bars
+        # Phase 1: Delete existing bars (and any stale checkpoint for today)
         deleted = await bar_persistence_service.delete_market_bars(pool, market)
+        await _checkpoint_clear(market, date.today())
         logger.info("Rebuild phase 1: deleted %d bars for market=%s", deleted, market)
 
         # Phase 2: Re-collect from scratch
@@ -228,11 +277,18 @@ async def rebuild_market(
 
         # Latest dates will all be empty since we deleted everything
         latest_dates: dict[str, date] = {}
+        today = date.today()
 
         if market == "cn":
-            result = await _collect_cn(market, symbols, latest_dates, started_at)
+            result = await _collect_cn(
+                market, symbols, latest_dates, started_at,
+                checkpoint_day=today, resume_skipped=0,
+            )
         else:
-            result = await _collect_yf(market, symbols, latest_dates, started_at)
+            result = await _collect_yf(
+                market, symbols, latest_dates, started_at,
+                checkpoint_day=today, resume_skipped=0,
+            )
 
         result["deleted"] = deleted
 
@@ -276,6 +332,7 @@ async def rebuild_market(
     finally:
         await _rebuild_counter(market)
         await _clear_progress(market)
+        await _checkpoint_clear(market, date.today())
         await _release_lock(market, owner)
 
 
@@ -289,6 +346,9 @@ async def _collect_cn(
     symbols: list[str],
     latest_dates: dict[str, date],
     started_at: datetime,
+    *,
+    checkpoint_day: date,
+    resume_skipped: int = 0,
 ) -> dict[str, Any]:
     """Collect CN daily bars in sequential batches of _CN_BATCH_SIZE.
 
@@ -301,6 +361,7 @@ async def _collect_cn(
     errors: list[dict] = []
     symbols_done = 0
     symbols_with_data = 0
+    grand_total = resume_skipped + len(symbols)
 
     for batch_start in range(0, len(symbols), _CN_BATCH_SIZE):
         batch = symbols[batch_start: batch_start + _CN_BATCH_SIZE]
@@ -358,9 +419,14 @@ async def _collect_cn(
             for sym, msg in fetch_errors.items():
                 errors.append({"symbol": sym, "error": msg, "category": "fetch"})
 
+        # Checkpoint: every symbol in this batch was either skipped
+        # (already up-to-date), fetched (success or empty), or hit a
+        # fetch error.  In all cases we don't want to re-fetch on resume.
+        await _checkpoint_add(market, checkpoint_day, batch)
+
         symbols_done += len(batch)
         await _update_progress(
-            market, symbols_done, len(symbols), total_inserted,
+            market, resume_skipped + symbols_done, grand_total, total_inserted,
             started_at=started_at, error_count=len(errors),
         )
 
@@ -370,7 +436,7 @@ async def _collect_cn(
         )
 
     return {
-        "symbol_count": len(symbols),
+        "symbol_count": grand_total,
         "new_bars": total_inserted,
         "errors": errors,
     }
@@ -386,6 +452,9 @@ async def _collect_yf(
     symbols: list[str],
     latest_dates: dict[str, date],
     started_at: datetime,
+    *,
+    checkpoint_day: date,
+    resume_skipped: int = 0,
 ) -> dict[str, Any]:
     """Collect daily bars via yfinance with windowed parallel fetching.
 
@@ -397,10 +466,12 @@ async def _collect_yf(
     today = date.today()
     total_inserted = 0
     errors: list[dict] = []
+    grand_total = resume_skipped + len(symbols)
 
     # Group symbols by start_date
     date_groups: dict[Optional[str], list[str]] = defaultdict(list)
     up_to_date_count = 0
+    up_to_date_symbols: list[str] = []
 
     for sym in symbols:
         last_date = latest_dates.get(sym)
@@ -409,12 +480,15 @@ async def _collect_yf(
         else:
             if last_date >= today:
                 up_to_date_count += 1
+                up_to_date_symbols.append(sym)
                 continue
             start = last_date + timedelta(days=1)
             date_groups[start.isoformat()].append(sym)
 
     if up_to_date_count:
         logger.info("Skipped %d already-up-to-date symbols", up_to_date_count)
+        # Up-to-date symbols are functionally "processed" for today.
+        await _checkpoint_add(market, checkpoint_day, up_to_date_symbols)
 
     # Build flat batch list: each entry is (start_str, [symbols])
     batches: list[tuple[Optional[str], list[str]]] = []
@@ -496,9 +570,15 @@ async def _collect_yf(
                     "category": "batch",
                 })
 
+            # Checkpoint the whole batch — even fetch errors are
+            # checkpointed so we don't hammer a permanently-bad symbol
+            # on every restart.  Manual /rebuild clears the checkpoint
+            # to force a re-fetch.
+            await _checkpoint_add(market, checkpoint_day, batch_symbols)
+
             symbols_done += len(batch_symbols)
             await _update_progress(
-                market, symbols_done, len(symbols), total_inserted,
+                market, resume_skipped + symbols_done, grand_total, total_inserted,
                 started_at=started_at, error_count=len(errors),
             )
 
@@ -514,10 +594,59 @@ async def _collect_yf(
         del responses
 
     return {
-        "symbol_count": len(symbols),
+        "symbol_count": grand_total,
         "new_bars": total_inserted,
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers (resume after restart)
+# ---------------------------------------------------------------------------
+
+
+async def _checkpoint_load(market: str, day: date) -> set[str]:
+    """Read the set of symbols already processed for `market` on `day`."""
+    try:
+        r = await get_redis()
+        key = _CHECKPOINT_KEY_TEMPLATE.format(market=market, day=day.isoformat())
+        members = await r.smembers(key)
+        # redis-py may return bytes or str depending on decode_responses
+        return {m.decode() if isinstance(m, bytes) else m for m in members}
+    except Exception as exc:
+        logger.warning("Failed to load checkpoint for %s/%s: %s", market, day, exc)
+        return set()
+
+
+async def _checkpoint_add(
+    market: str, day: date, symbols: list[str],
+) -> None:
+    """Mark a batch of symbols as processed for resume purposes."""
+    if not symbols:
+        return
+    try:
+        r = await get_redis()
+        key = _CHECKPOINT_KEY_TEMPLATE.format(market=market, day=day.isoformat())
+        # SADD + EXPIRE in a pipeline so the TTL gets refreshed each batch
+        pipe = r.pipeline()
+        pipe.sadd(key, *symbols)
+        pipe.expire(key, _CHECKPOINT_TTL)
+        await pipe.execute()
+    except Exception as exc:
+        logger.warning(
+            "Failed to write checkpoint for %s/%s (%d symbols): %s",
+            market, day, len(symbols), exc,
+        )
+
+
+async def _checkpoint_clear(market: str, day: date) -> None:
+    """Drop today's checkpoint after a successful run completes."""
+    try:
+        r = await get_redis()
+        key = _CHECKPOINT_KEY_TEMPLATE.format(market=market, day=day.isoformat())
+        await r.delete(key)
+    except Exception as exc:
+        logger.warning("Failed to clear checkpoint for %s/%s: %s", market, day, exc)
 
 
 # ---------------------------------------------------------------------------
