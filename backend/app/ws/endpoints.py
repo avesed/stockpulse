@@ -150,6 +150,21 @@ async def _handle_subscribe(session_id: str, msg: dict[str, Any], *, is_admin: b
             session_id, make_subscribed("quotes", symbols=accepted),
         )
 
+        if accepted:
+            settings = get_settings()
+            default_provider = settings.WS_DEFAULT_PROVIDER
+            try:
+                from app.ws.upstream.collector_service import start_collector
+                result = await start_collector(default_provider, accepted)
+                logger.info(
+                    "Auto-started %s collector for /ws/data session %s: %s",
+                    default_provider, session_id, result.get("message", ""),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to auto-start %s collector: %s", default_provider, e,
+                )
+
     elif channel == "collection_progress":
         if not is_admin:
             await manager.send_to_session(

@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     WS_MAX_CONNECTIONS_PER_CONSUMER: int = 5  # per API consumer
     WS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 50  # symbols per WS session
     WS_UPSTREAM_RECONNECT_MAX_DELAY: int = 30   # max backoff seconds
+    WS_DEFAULT_PROVIDER: str = "yfinance"       # auto-started for /ws/data subscribes
 
     # Upstream WebSocket URLs
     FINNHUB_WS_URL: str = "wss://ws.finnhub.io"
