@@ -18,6 +18,10 @@ POST /api/v1/data/reference/cn-concept-mapping
 POST /api/v1/data/reference/stock-profiles-batch
     Fetch stock profiles for a small batch (max 50 symbols) of any market.
     Timeout hint: 60s.
+
+GET /api/v1/data/reference/profiles/search
+    Search stock profiles by name, sector, industry, or concept keywords.
+    Returns matching profiles from the local DB. Fast (<50ms).
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ import logging
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from app.core.auth import verify_api_key
@@ -35,6 +39,7 @@ from app.schemas.reference import (
     ConceptMappingResult,
     IndexConstituentsResult,
     StockListResult,
+    StockProfileData,
     StockProfileResult,
 )
 
@@ -337,3 +342,100 @@ async def get_index_constituents_endpoint(
             error=str(e),
             elapsed_ms=elapsed_ms,
         )
+
+
+# ---------------------------------------------------------------------------
+# Profile search (for RAG / tool-call integration)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/profiles/search",
+    response_model=ApiResponse[list[StockProfileData]],
+)
+async def search_profiles_endpoint(
+    q: str = Query(..., min_length=1, max_length=100),
+    market: Optional[str] = Query(None),
+    limit: int = Query(5, ge=1, le=20),
+):
+    """Search stock profiles by name, sector, industry, or concept keywords.
+
+    Fast DB lookup (~10ms) against the stock_profiles table. Designed for
+    LLM tool-call integration: the finance analyzer agent calls this to
+    resolve company/sector mentions to actual ticker symbols.
+
+    Name/name_zh matches are ranked higher than sector/industry/concept matches.
+    """
+    from app.core.database import get_db_pool
+
+    t0 = time.monotonic()
+    try:
+        pool = get_db_pool()
+    except RuntimeError:
+        return ApiResponse(success=False, error="DB pool not available")
+
+    pattern = f"%{q}%"
+
+    try:
+        async with pool.acquire(timeout=5) as conn:
+            if market:
+                rows = await conn.fetch(
+                    """
+                    SELECT symbol, market, name, name_zh, sector, industry, concepts
+                    FROM stock_profiles
+                    WHERE (name ILIKE $1 OR name_zh ILIKE $1
+                           OR sector ILIKE $1 OR industry ILIKE $1
+                           OR concepts::text ILIKE $1)
+                      AND market = $2
+                    ORDER BY
+                        CASE WHEN name ILIKE $1 OR name_zh ILIKE $1 THEN 0 ELSE 1 END,
+                        symbol
+                    LIMIT $3
+                    """,
+                    pattern, market, limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT symbol, market, name, name_zh, sector, industry, concepts
+                    FROM stock_profiles
+                    WHERE name ILIKE $1 OR name_zh ILIKE $1
+                          OR sector ILIKE $1 OR industry ILIKE $1
+                          OR concepts::text ILIKE $1
+                    ORDER BY
+                        CASE WHEN name ILIKE $1 OR name_zh ILIKE $1 THEN 0 ELSE 1 END,
+                        symbol
+                    LIMIT $2
+                    """,
+                    pattern, limit,
+                )
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.exception("Profile search failed for q=%s: %s", q, e)
+        return ApiResponse(success=False, error=str(e), elapsed_ms=elapsed_ms)
+
+    import json as _json
+
+    profiles = [
+        StockProfileData(
+            symbol=r["symbol"],
+            market=r["market"],
+            name=r["name"],
+            name_zh=r["name_zh"],
+            sector=r["sector"],
+            industry=r["industry"],
+            concepts=(
+                _json.loads(r["concepts"])
+                if isinstance(r["concepts"], str)
+                else (r["concepts"] or [])
+            ),
+        )
+        for r in rows
+    ]
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    logger.info(
+        "Profile search q=%r market=%s: %d results in %dms",
+        q, market, len(profiles), elapsed_ms,
+    )
+    return ApiResponse(data=profiles, source="db", elapsed_ms=elapsed_ms)
