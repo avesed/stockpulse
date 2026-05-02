@@ -28,7 +28,8 @@ export function useCollectionProgressWs(markets: readonly string[]) {
 
     ws.onMessage = (event: WsServerEvent) => {
       if (event.type === 'collection_progress') {
-        const jobType = (event as Record<string, unknown>).job_type as string | undefined
+        const evt = event as unknown as Record<string, unknown>
+        const jobType = evt.job_type as string | undefined
 
         updateCollectionProgress(event)
 
@@ -41,7 +42,7 @@ export function useCollectionProgressWs(markets: readonly string[]) {
               message: `${event.new_bars} new bars`,
               elapsedSeconds: event.elapsed_seconds,
               errorsCount: event.error_count,
-              estimatedRemaining: (event as Record<string, unknown>).estimated_remaining ?? null,
+              estimatedRemaining: evt.estimated_remaining ?? null,
             },
             taskRunning: event.percent < 100,
             lastRun: (old as { lastRun?: unknown } | undefined)?.lastRun ?? null,
