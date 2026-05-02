@@ -260,16 +260,30 @@ async def trigger_fund_collect(job_type: str, market: str) -> dict[str, Any]:
 
 @router.get("/fundamentals/{job_type}/{market}/progress")
 async def get_fund_progress(job_type: str, market: str) -> dict[str, Any]:
-    """Get fundamentals sub-job progress."""
+    """Get fundamentals sub-job progress (same shape as daily-bars progress)."""
     from app.services import fundamentals_collection_service
 
-    progress = await fundamentals_collection_service.get_progress(job_type.lower(), market.lower())
+    raw = await fundamentals_collection_service.get_progress(job_type.lower(), market.lower())
     task_key = f"{job_type.lower()}_{market.lower()}"
+    task_running = task_key in _running_fund_tasks and not _running_fund_tasks[task_key].done()
+
+    progress = None
+    if raw and "symbolsDone" in raw:
+        progress = {
+            "current": raw.get("symbolsDone", 0),
+            "total": raw.get("symbolsTotal", 0),
+            "message": f"{raw.get('upserted', 0)} upserted",
+            "elapsedSeconds": raw.get("elapsedSeconds"),
+            "errorsCount": raw.get("errorsCount", 0),
+            "estimatedRemaining": raw.get("estimatedRemaining"),
+            "startedAt": raw.get("startedAt"),
+        }
+
     return {
         "jobType": job_type,
         "market": market,
         "progress": progress,
-        "taskRunning": task_key in _running_fund_tasks and not _running_fund_tasks[task_key].done(),
+        "taskRunning": task_running,
     }
 
 

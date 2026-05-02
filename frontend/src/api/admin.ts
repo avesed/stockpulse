@@ -117,6 +117,43 @@ export async function getStockListProgress(): Promise<{ progress: unknown; taskR
   return response.data
 }
 
+// Collection — fundamentals
+export interface FundProgress {
+  jobType: string
+  market: string
+  progress: {
+    current: number
+    total: number
+    message: string
+    elapsedSeconds: number | null
+    errorsCount: number
+    estimatedRemaining: number | null
+    startedAt: string | null
+  } | null
+  taskRunning: boolean
+}
+
+const FUND_JOBS = ['financials', 'analyst_ratings', 'northbound', 'institutional_holders', 'fund_holdings'] as const
+
+export async function getFundamentalsProgress(market: string): Promise<FundProgress[]> {
+  const results = await Promise.all(
+    FUND_JOBS.map(async (job) => {
+      try {
+        const r = await apiClient.get<FundProgress>(`/admin/collection/fundamentals/${job}/${market}/progress`)
+        return r.data
+      } catch {
+        return { jobType: job, market, progress: null, taskRunning: false }
+      }
+    })
+  )
+  return results
+}
+
+export async function startFundamentals(jobType: string, market: string): Promise<{ status: string }> {
+  const r = await apiClient.post<{ status: string }>(`/admin/collection/fundamentals/${jobType}/${market}/collect`)
+  return r.data
+}
+
 // Collection — profiles
 export async function startProfileCollection(market: string): Promise<{ status: string; market: string; message: string }> {
   const response = await apiClient.post<{ status: string; market: string; message: string }>(

@@ -116,10 +116,7 @@ async def get_symbols(market: str) -> list[str]:
         return cached
 
     # Resolve from DB (fast) → fallback to static list
-    if market == "hk":
-        symbols = await _resolve_hk_symbols()
-    else:
-        symbols = await _resolve_from_db(market)
+    symbols = await _resolve_from_db(market)
 
     # Cache the result
     if symbols:

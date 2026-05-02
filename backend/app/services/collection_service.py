@@ -765,6 +765,7 @@ async def _update_progress(
             make_collection_progress(
                 market, symbols_done, symbols_total, new_bars, pct,
                 error_count=error_count, elapsed_seconds=elapsed,
+                job_type="collect", estimated_remaining=estimated_remaining,
             )
         )
     except Exception:

@@ -159,9 +159,12 @@ def make_collection_progress(
     market: str, symbols_done: int, symbols_total: int,
     new_bars: int, percent: int,
     error_count: int = 0, elapsed_seconds: float = 0,
+    job_type: str = "collect",
+    estimated_remaining: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    msg: dict[str, Any] = {
         "type": "collection_progress",
+        "job_type": job_type,
         "market": market,
         "symbols_done": symbols_done,
         "symbols_total": symbols_total,
@@ -171,6 +174,9 @@ def make_collection_progress(
         "elapsed_seconds": round(elapsed_seconds, 1),
         "updated_at": _now_iso(),
     }
+    if estimated_remaining is not None:
+        msg["estimated_remaining"] = round(estimated_remaining, 1)
+    return msg
 
 
 def make_collector_status(

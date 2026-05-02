@@ -326,7 +326,6 @@ async def collect_cn_profiles() -> List[Dict[str, Any]]:
 
 async def collect_us_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
     """Collect US stock profiles via Yahoo quoteSummary (1 HTTP req per symbol)."""
-    symbols = symbols[:5000]
     logger.info("[StockProfile] Starting US profile collection: %d symbols", len(symbols))
     t0 = time.monotonic()
 
@@ -405,7 +404,6 @@ async def collect_us_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
 
 async def collect_hk_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
     """Collect HK stock profiles via Yahoo quoteSummary (1 HTTP req per symbol)."""
-    symbols = symbols[:500]
     logger.info("[StockProfile] Starting HK profile collection for %d symbols", len(symbols))
     t0 = time.monotonic()
 

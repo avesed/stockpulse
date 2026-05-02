@@ -234,10 +234,12 @@ async def _run_job(
                 await collection_run_service.fail_run(run_id, "No symbols")
             return {"symbol_count": 0, "errors": ["No symbols"]}
 
-        logger.info("%s collection started: market=%s, symbols=%d", job_type, market, len(symbols))
+        total = len(symbols)
+        logger.info("[%s/%s] started: %d symbols", job_type, market, total)
 
         batch_size = _YF_BATCH if use_yf else _AK_BATCH
         delay = _YF_DELAY if use_yf else _AK_DELAY
+        log_interval = max(total // 10, 100)
 
         pool = get_db_pool()
         today = datetime.now(timezone.utc).date()
@@ -245,7 +247,6 @@ async def _run_job(
         done = 0
         upserted = 0
 
-        # Instantiate provider once
         if use_yf:
             from app.providers.yfinance_provider import YFinanceProvider
             provider = YFinanceProvider()
@@ -263,14 +264,28 @@ async def _run_job(
                     errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
                 done += 1
 
-            await _update_progress(progress_key, done, len(symbols), started_at, len(errors))
+            await _update_progress(
+                progress_key, done, total, started_at, len(errors),
+                upserted=upserted, job_type=job_type, market=market,
+            )
+
+            if done % log_interval < batch_size:
+                elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+                eta = round(elapsed * (total - done) / done, 0) if done > 0 else 0
+                logger.info(
+                    "[%s/%s] %d/%d (%d%%) upserted=%d errors=%d elapsed=%ds ETA=%ds",
+                    job_type, market, done, total,
+                    int(done * 100 / total), upserted, len(errors),
+                    int(elapsed), int(eta),
+                )
 
             if i + batch_size < len(symbols):
                 await asyncio.sleep(delay)
 
+        elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         logger.info(
-            "%s complete: market=%s, symbols=%d, upserted=%d, errors=%d",
-            job_type, market, len(symbols), upserted, len(errors),
+            "[%s/%s] complete: %d symbols, upserted=%d, errors=%d, %.0fs",
+            job_type, market, total, upserted, len(errors), elapsed,
         )
 
         if run_id:
@@ -535,21 +550,42 @@ async def _release_lock(lock_key: str, owner: str) -> None:
 async def _update_progress(
     progress_key: str, done: int, total: int,
     started_at: datetime, error_count: int = 0,
+    upserted: int = 0,
+    job_type: str = "",
+    market: str = "",
 ) -> None:
     try:
         r = await get_redis()
         now = datetime.now(timezone.utc)
         elapsed = (now - started_at).total_seconds()
         pct = int(done * 100 / total) if total > 0 else 0
+        estimated_remaining = None
+        if done > 0 and done < total:
+            estimated_remaining = round(elapsed * (total - done) / done, 1)
+
         progress = {
             "symbolsDone": done,
             "symbolsTotal": total,
+            "upserted": upserted,
             "percent": pct,
             "elapsedSeconds": round(elapsed, 1),
             "errorsCount": error_count,
+            "estimatedRemaining": estimated_remaining,
+            "startedAt": started_at.isoformat(),
             "updatedAt": now.isoformat(),
         }
         await r.setex(progress_key, _PROGRESS_TTL, json.dumps(progress))
+
+        if job_type and market:
+            from app.ws.redis_fanout import publish_collection_progress
+            from app.ws.protocol import make_collection_progress
+            await publish_collection_progress(
+                make_collection_progress(
+                    market, done, total, upserted, pct,
+                    error_count=error_count, elapsed_seconds=elapsed,
+                    job_type=job_type, estimated_remaining=estimated_remaining,
+                )
+            )
     except Exception:
         pass
 
