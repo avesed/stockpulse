@@ -312,12 +312,12 @@ async def force_unlock(market: str) -> bool:
 async def _collect_profiles_for_market(market: str) -> list[dict[str, Any]]:
     """Dispatch collection to the appropriate function in stock_profile_service.
 
-    For CN, uses ``collect_cn_profiles()`` (monolithic: concept mapping +
-    individual stock info in one call), then extracts the concept mapping
-    from returned profiles to save to disk separately.
+    For CN, uses ``collect_cn_profiles()`` (Yahoo quoteSummary + concept
+    enrichment), then extracts the concept mapping from returned profiles
+    to save to disk separately.
 
     For US/HK, resolves symbols first via ``symbol_resolver``, then calls
-    the monolithic collection functions.
+    the Yahoo quoteSummary-based collection functions.
     """
     from app.services import stock_profile_service, symbol_resolver
 

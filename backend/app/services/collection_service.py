@@ -100,6 +100,7 @@ async def collect_market(
 
     # Create audit record
     run_id: int | None = None
+    run_finalized = False
     started_at = datetime.now(timezone.utc)
     try:
         run = await collection_run_service.create_run(market, "collect", triggered_by)
@@ -188,6 +189,7 @@ async def collect_market(
                     new_bars=result.get("new_bars", 0),
                     errors=result.get("errors", []),
                 )
+                run_finalized = True
                 await collection_run_service.cleanup_old_runs()
             except Exception:
                 logger.warning("Failed to complete run record %d", run_id)
@@ -199,6 +201,7 @@ async def collect_market(
         if run_id:
             try:
                 await collection_run_service.fail_run(run_id, str(exc))
+                run_finalized = True
             except Exception:
                 pass
         return {
@@ -207,11 +210,13 @@ async def collect_market(
             "errors": [{"symbol": "", "error": f"Collection failed: {exc}", "category": "fatal"}],
         }
     finally:
+        if run_id and not run_finalized:
+            try:
+                await collection_run_service.fail_run(run_id, "interrupted")
+            except Exception:
+                pass
         await _rebuild_counter(market)
         await _clear_progress(market)
-        # Successful or graceful return: drop today's checkpoint so a
-        # manual re-run starts fresh.  If we crashed without reaching
-        # this finally (e.g. SIGKILL), the 36h TTL takes over.
         await _checkpoint_clear(market, date.today())
         await _release_lock(market, owner)
 
@@ -240,6 +245,7 @@ async def rebuild_market(
 
     # Create audit record
     run_id: int | None = None
+    run_finalized = False
     started_at = datetime.now(timezone.utc)
     try:
         run = await collection_run_service.create_run(market, "rebuild", triggered_by)
@@ -251,17 +257,16 @@ async def rebuild_market(
     try:
         pool = get_db_pool()
 
-        # Phase 1: Delete existing bars (and any stale checkpoint for today)
         deleted = await bar_persistence_service.delete_market_bars(pool, market)
         await _checkpoint_clear(market, date.today())
         logger.info("Rebuild phase 1: deleted %d bars for market=%s", deleted, market)
 
-        # Phase 2: Re-collect from scratch
         symbols = await symbol_resolver.get_symbols(market)
         if not symbols:
             logger.warning("No symbols found for market=%s after delete", market)
             if run_id:
                 await collection_run_service.fail_run(run_id, "No symbols found after delete")
+                run_finalized = True
             return {
                 "symbol_count": 0,
                 "new_bars": 0,
@@ -275,7 +280,6 @@ async def rebuild_market(
         )
         await _update_progress(market, 0, len(symbols), 0, started_at=started_at, error_count=0)
 
-        # Latest dates will all be empty since we deleted everything
         latest_dates: dict[str, date] = {}
         today = date.today()
 
@@ -300,7 +304,6 @@ async def rebuild_market(
             len(result.get("errors", [])),
         )
 
-        # Complete audit record
         if run_id:
             try:
                 await collection_run_service.complete_run(
@@ -310,6 +313,7 @@ async def rebuild_market(
                     new_bars=result.get("new_bars", 0),
                     errors=result.get("errors", []),
                 )
+                run_finalized = True
                 await collection_run_service.cleanup_old_runs()
             except Exception:
                 logger.warning("Failed to complete run record %d", run_id)
@@ -321,6 +325,7 @@ async def rebuild_market(
         if run_id:
             try:
                 await collection_run_service.fail_run(run_id, str(exc))
+                run_finalized = True
             except Exception:
                 pass
         return {
@@ -330,6 +335,11 @@ async def rebuild_market(
             "errors": [{"symbol": "", "error": f"Rebuild failed: {exc}", "category": "fatal"}],
         }
     finally:
+        if run_id and not run_finalized:
+            try:
+                await collection_run_service.fail_run(run_id, "interrupted")
+            except Exception:
+                pass
         await _rebuild_counter(market)
         await _clear_progress(market)
         await _checkpoint_clear(market, date.today())

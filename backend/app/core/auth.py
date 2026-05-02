@@ -172,11 +172,23 @@ async def verify_api_key(
     if consumer is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or inactive API key")
 
-    # Update last_used_at
-    await db.execute(
-        update(ApiConsumer)
-        .where(ApiConsumer.id == consumer.id)
-        .values(last_used_at=datetime.now(timezone.utc))
-    )
+    # Throttle last_used_at writes: skip if updated within the last 5 minutes
+    throttle_key = f"sp:consumer:last_used:{consumer.id}"
+    try:
+        redis_client = await get_redis()
+        already_fresh = await redis_client.get(throttle_key)
+    except Exception:
+        already_fresh = None
+
+    if not already_fresh:
+        await db.execute(
+            update(ApiConsumer)
+            .where(ApiConsumer.id == consumer.id)
+            .values(last_used_at=datetime.now(timezone.utc))
+        )
+        try:
+            await redis_client.set(throttle_key, "1", ex=300)
+        except Exception:
+            pass
 
     return consumer

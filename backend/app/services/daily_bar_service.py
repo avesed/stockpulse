@@ -1,8 +1,8 @@
-"""Fetch daily OHLCV bars from external providers (yfinance, akshare).
+"""Fetch daily OHLCV bars from external providers (yfinance).
 
-CN market uses akshare (ak.stock_zh_a_hist) with per-symbol concurrent fetches.
-US/HK/Metal markets use yfinance batch download (yf.download), grouped by
-start_date since all symbols in a single call must share the same start.
+All markets (US/CN/HK/Metal) use yfinance batch download (yf.download),
+grouped by start_date since all symbols in a single call must share the
+same start.
 
 This service is stateless -- it only fetches data from external APIs and returns
 it.  Persistence is handled by the backend's DailyBarService.
@@ -62,10 +62,7 @@ class DailyBarFetcher:
             market, len(symbols_with_dates),
         )
 
-        if market == "cn":
-            return await self._fetch_cn_batch(symbols_with_dates)
-        else:
-            return await self._fetch_yf_batch(symbols_with_dates)
+        return await self._fetch_yf_batch(symbols_with_dates)
 
     # ------------------------------------------------------------------
     # CN path (akshare)

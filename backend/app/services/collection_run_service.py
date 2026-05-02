@@ -143,6 +143,30 @@ async def get_last_completed(market: str) -> dict | None:
         }
 
 
+async def mark_stale_runs_failed(stale_minutes: int = 120) -> int:
+    """Mark collection_runs stuck in 'running' as 'failed' on startup."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("""
+                UPDATE collection_runs
+                SET status = 'failed',
+                    finished_at = NOW(),
+                    duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at)),
+                    error_count = 1,
+                    errors_json = '[{"symbol":"","error":"stale run: process crashed or restarted","category":"fatal"}]'::jsonb
+                WHERE status = 'running'
+                  AND started_at < NOW() - INTERVAL '1 minute' * :minutes
+            """),
+            {"minutes": stale_minutes},
+        )
+        await session.commit()
+        count = result.rowcount or 0
+        if count:
+            logger.warning("Marked %d stale collection_runs as failed (>%dm old)", count, stale_minutes)
+        return count
+
+
 async def cleanup_old_runs(keep_per_market: int = 500) -> int:
     """Delete runs beyond the newest `keep_per_market` per market."""
     factory = get_session_factory()

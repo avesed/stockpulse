@@ -59,12 +59,14 @@ async def health_check(response: Response):
     # Report which API keys are configured (never expose actual keys)
     try:
         from app.core.api_keys import get_api_key
+        def _provider_status(name: str) -> str:
+            return "ok" if get_api_key(name) else "unconfigured"
         checks["providers"] = {
-            "yfinance": True,
-            "akshare": True,
-            "finnhub": bool(get_api_key("finnhub")),
-            "tiingo": bool(get_api_key("tiingo")),
-            "tushare": bool(get_api_key("tushare")),
+            "yfinance": "ok",
+            "akshare": "ok",
+            "finnhub": _provider_status("finnhub"),
+            "tiingo": _provider_status("tiingo"),
+            "tushare": _provider_status("tushare"),
         }
     except Exception:
         checks["providers"] = "not_initialized"

@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.core.executor import start_watchdog, stop_watchdog, shutdown_executor
     start_watchdog()
 
+    # Clean up stale collection_runs left by previous crashes
+    from app.services.collection_run_service import mark_stale_runs_failed
+    await mark_stale_runs_failed()
+
     # Start scheduler (leader election ensures single-worker execution)
     from app.core.scheduler import start_scheduler, stop_scheduler
     await start_scheduler()

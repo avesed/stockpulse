@@ -30,6 +30,20 @@ _CACHE_TTL = 86400  # 24 hours
 # Major US exchanges — excludes OTC (OOTC) due to poor data coverage
 _US_MAJOR_EXCHANGES = {"XNAS", "XNYS", "ARCX", "BATS", "XASE"}
 
+# Non-common-stock suffixes to exclude (preferred, warrants, units, rights)
+_EXCLUDED_SUFFIXES = (".WS", ".U", ".RT")
+
+
+def _is_common_stock(symbol: str) -> bool:
+    """Filter out preferred shares, warrants, units, and rights."""
+    if any(symbol.endswith(s) for s in _EXCLUDED_SUFFIXES):
+        return False
+    # .PRx = preferred share (e.g. ABR.PRD, ACP.PRA)
+    parts = symbol.split(".")
+    if len(parts) == 2 and parts[1].startswith("PR") and len(parts[1]) <= 4:
+        return False
+    return True
+
 # Market code mapping: collection market -> DB market values
 _MARKET_DB_MAP = {
     "us": ("us",),
@@ -50,11 +64,18 @@ _CN_FALLBACK_SYMBOLS = [
 
 _METAL_SYMBOLS = ["GC=F", "SI=F", "PL=F", "PA=F"]
 
+_HK_FALLBACK_SYMBOLS = [
+    "00700.HK", "09988.HK", "00941.HK", "01810.HK", "02318.HK",
+    "03690.HK", "09999.HK", "00388.HK", "02020.HK", "01024.HK",
+    "00005.HK", "01398.HK", "00939.HK", "02628.HK", "00883.HK",
+    "01211.HK", "00027.HK", "00669.HK", "09618.HK", "09888.HK",
+]
+
 # Fallback map per market
 _FALLBACK_MAP = {
     "us": _US_FALLBACK_SYMBOLS,
     "cn": _CN_FALLBACK_SYMBOLS,
-    "hk": [],
+    "hk": _HK_FALLBACK_SYMBOLS,
     "metal": _METAL_SYMBOLS,
 }
 
@@ -198,6 +219,15 @@ async def _resolve_from_db(market: str) -> list[str]:
 
         symbols = [row["symbol"] for row in rows]
 
+        if market == "us":
+            before = len(symbols)
+            symbols = [s for s in symbols if _is_common_stock(s)]
+            if before != len(symbols):
+                logger.info(
+                    "Filtered %d non-common-stock US symbols (%d -> %d)",
+                    before - len(symbols), before, len(symbols),
+                )
+
         if symbols:
             logger.info(
                 "Resolved %d %s symbols from DB (markets=%s)",
@@ -218,7 +248,7 @@ async def _resolve_from_db(market: str) -> list[str]:
 
 
 async def _resolve_hk_symbols() -> list[str]:
-    """Get HK symbols via HSI constituents service."""
+    """Get HK symbols via HSI constituents service, with static fallback."""
     try:
         from app.services.hsi_service import get_hsi_constituents
 
@@ -227,7 +257,7 @@ async def _resolve_hk_symbols() -> list[str]:
         if symbols:
             logger.info("Resolved %d HK (HSI) symbols", len(symbols))
             return symbols
-        logger.warning("HSI service returned 0 symbols")
+        logger.warning("HSI service returned 0 symbols, using fallback")
     except Exception as exc:
-        logger.warning("Failed to resolve HK symbols: %s", exc)
-    return []
+        logger.warning("Failed to resolve HK symbols: %s, using fallback", exc)
+    return list(_HK_FALLBACK_SYMBOLS)

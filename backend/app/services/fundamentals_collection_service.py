@@ -99,6 +99,8 @@ async def collect_analyst_ratings(
     return await _run_job("analyst_ratings", market, _per_symbol, True, triggered_by)
 
 
+_NB_CONSECUTIVE_FAIL_LIMIT = 50
+
 async def collect_northbound(
     market: str = "cn", *, triggered_by: str = "scheduler",
 ) -> dict[str, Any]:
@@ -107,13 +109,31 @@ async def collect_northbound(
     if market != "cn":
         return {"symbol_count": 0, "errors": [], "skipped": "northbound is CN only"}
 
+    consecutive_fails = 0
+
     async def _per_symbol(pool, sym, provider, today):
+        nonlocal consecutive_fails
+        if consecutive_fails >= _NB_CONSECUTIVE_FAIL_LIMIT:
+            return 0
         try:
             nb = await provider.get_northbound_holding(sym, days=5)
             if nb and nb.get("holdings"):
+                consecutive_fails = 0
                 return await _upsert_northbound(pool, sym, nb["holdings"])
+            consecutive_fails += 1
+            if consecutive_fails == _NB_CONSECUTIVE_FAIL_LIMIT:
+                logger.warning(
+                    "Northbound: %d consecutive failures, halting remaining symbols",
+                    consecutive_fails,
+                )
         except Exception as exc:
+            consecutive_fails += 1
             logger.debug("Northbound skipped for %s: %s", sym, exc)
+            if consecutive_fails == _NB_CONSECUTIVE_FAIL_LIMIT:
+                logger.warning(
+                    "Northbound: %d consecutive failures, halting remaining symbols",
+                    consecutive_fails,
+                )
         return 0
 
     return await _run_job("northbound", market, _per_symbol, False, triggered_by)
@@ -198,6 +218,7 @@ async def _run_job(
         return {"symbol_count": 0, "errors": ["Already running"]}
 
     run_id: int | None = None
+    run_finalized = False
     started_at = datetime.now(timezone.utc)
     try:
         run = await collection_run_service.create_run(market, job_type, triggered_by)
@@ -257,6 +278,7 @@ async def _run_job(
                 await collection_run_service.complete_run(
                     run_id, len(symbols), done, upserted, errors,
                 )
+                run_finalized = True
             except Exception:
                 pass
 
@@ -267,10 +289,16 @@ async def _run_job(
         if run_id:
             try:
                 await collection_run_service.fail_run(run_id, str(exc))
+                run_finalized = True
             except Exception:
                 pass
         return {"symbol_count": 0, "errors": [{"symbol": "", "error": str(exc), "category": "fatal"}]}
     finally:
+        if run_id and not run_finalized:
+            try:
+                await collection_run_service.fail_run(run_id, "interrupted")
+            except Exception:
+                pass
         await _clear_progress(progress_key)
         await _release_lock(lock_key, owner)
 

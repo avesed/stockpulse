@@ -1,12 +1,12 @@
 """Stock profile data collection service for knowledge base construction.
 
-Collects enriched stock profiles from multiple data sources:
-- A-shares (CN): akshare concept boards (inverted mapping) + individual stock info
-- US stocks: yfinance Ticker info (industry, sector, description)
-- HK stocks: yfinance Ticker info (major stocks only)
+Collects enriched stock profiles via Yahoo quoteSummary API (single request
+per symbol, modules=assetProfile,quoteType).  1/3 the HTTP overhead of
+yfinance ``Ticker.info``.
 
-Returns raw dicts matching the StockProfileData model. Does NOT perform
-embedding -- the backend handles that step.
+- A-shares (CN): Yahoo quoteSummary + AKShare concept boards (enrichment)
+- US stocks: Yahoo quoteSummary
+- HK stocks: Yahoo quoteSummary
 
 Two endpoint modes:
 - **Monolithic** (legacy): ``collect_cn/us/hk_profiles()`` -- full market collection
@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # Maximum consecutive 429 errors before aborting the current market collection
 _MAX_429_STREAK = 10
 
+_QUOTE_SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+_QUOTE_SUMMARY_PARAMS = {
+    "modules": "assetProfile,quoteType",
+    "formatted": "false",
+}
+
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception signals HTTP 429 Too Many Requests."""
@@ -39,6 +45,36 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     if status == 429:
         return True
     return False
+
+
+def _fetch_yahoo_profile_sync(symbol: str) -> Optional[Dict[str, Any]]:
+    """Single-request Yahoo quoteSummary fetch (assetProfile + quoteType only)."""
+    import yfinance as yf
+
+    ticker = yf.Ticker(symbol)
+    yd = ticker._data
+    url = _QUOTE_SUMMARY_URL.format(symbol=symbol)
+    params = {**_QUOTE_SUMMARY_PARAMS, "symbol": symbol}
+    resp = yd.get(url=url, params=params)
+    if resp is None:
+        return None
+    data = resp.json()
+    results = data.get("quoteSummary", {}).get("result")
+    if not results:
+        return None
+    result = results[0]
+    ap = result.get("assetProfile", {})
+    qt = result.get("quoteType", {})
+    name = qt.get("shortName") or qt.get("longName", "")
+    if not name:
+        return None
+    return {
+        "name": name,
+        "sector": ap.get("sector", ""),
+        "industry": ap.get("industry", ""),
+        "description": (ap.get("longBusinessSummary") or "")[:500],
+        "website": ap.get("website", ""),
+    }
 
 
 def _cn_code_to_symbol(code: str) -> Tuple[str, str]:
@@ -182,142 +218,116 @@ async def collect_concept_mapping() -> Tuple[
 # ---------------------------------------------------------------------------
 
 async def collect_cn_profiles() -> List[Dict[str, Any]]:
-    """Collect A-share profiles via akshare concept boards + stock info.
-
-    This is the monolithic version that does concept mapping + individual info
-    in one call. May timeout for HTTP endpoints; prefer the granular
-    ``collect_concept_mapping()`` + ``fetch_cn_stock_info_batch()`` combo.
-    """
-    import akshare as ak
-
-    logger.info("[StockProfile] Starting CN profile collection (monolithic)")
+    """Collect A-share profiles via Yahoo quoteSummary, with optional concept enrichment."""
+    logger.info("[StockProfile] Starting CN profile collection")
     t0 = time.monotonic()
 
-    # Step 1-2: Get concept mapping
-    concepts_dict, names_dict = await collect_concept_mapping()
-    if not concepts_dict:
+    try:
+        from app.core.database import get_db_pool
+        pool = get_db_pool()
+        rows = await pool.fetch(
+            "SELECT symbol, name_zh FROM stock_symbols "
+            "WHERE market IN ('sh','sz') ORDER BY symbol"
+        )
+    except Exception as e:
+        logger.error("[StockProfile] Failed to load CN symbols from DB: %s", e)
         return []
 
-    # Step 3: Fetch individual stock info for each stock
+    if not rows:
+        logger.warning("[StockProfile] No CN symbols in DB")
+        return []
+
+    symbols = [(r["symbol"], r["name_zh"] or "") for r in rows]
+    logger.info("[StockProfile] Loaded %d CN symbols from DB", len(symbols))
+
+    concepts_dict: Dict[str, List[str]] = {}
+    try:
+        cm, _ = await collect_concept_mapping()
+        if cm:
+            concepts_dict = cm
+            logger.info("[StockProfile] Concept mapping loaded: %d stocks", len(cm))
+    except Exception as e:
+        logger.warning("[StockProfile] Concept mapping failed (continuing without): %s", e)
+
     profiles: List[Dict[str, Any]] = []
-    info_sem = asyncio.Semaphore(3)
-    info_errors = 0
-    info_429_streak = 0
-    info_abort = asyncio.Event()
+    sem = asyncio.Semaphore(10)
+    errors = 0
+    streak_429 = 0
+    abort_event = asyncio.Event()
 
-    async def fetch_stock_info(code: str, concepts: List[str]) -> None:
-        nonlocal info_errors, info_429_streak
-        if info_abort.is_set():
+    async def fetch_profile(symbol: str, name_zh: str) -> None:
+        nonlocal errors, streak_429
+        if abort_event.is_set():
             return
-        async with info_sem:
-            if info_abort.is_set():
+        async with sem:
+            if abort_event.is_set():
                 return
-            symbol, market = _cn_code_to_symbol(code)
-            name_zh = names_dict.get(code, "")
-
-            profile: Dict[str, Any] = {
-                "symbol": symbol,
-                "market": market,
-                "name": "",
-                "name_zh": name_zh,
-                "sector": "",
-                "industry": "",
-                "concepts": concepts,
-                "main_business": "",
-                "description": "",
-            }
-
+            code = symbol.split(".")[0]
             for attempt in range(3):
                 try:
-                    df = await run_in_executor(
-                        lambda c=code: ak.stock_individual_info_em(symbol=c),
+                    info = await run_in_executor(
+                        lambda s=symbol: _fetch_yahoo_profile_sync(s),
                         timeout=30.0,
                     )
-                    info_429_streak = 0
-                    if df is not None and not df.empty:
-                        info: Dict[str, str] = {}
-                        for _, row in df.iterrows():
-                            info[row["item"]] = row["value"]
-                        biz_scope = str(info.get("\u7ecf\u8425\u8303\u56f4", ""))[:500]
-                        profile["main_business"] = biz_scope
-                        profile["description"] = biz_scope
-                        profile["industry"] = str(info.get("\u884c\u4e1a", ""))
-                        profile["sector"] = str(info.get("\u884c\u4e1a", ""))
-                        profile["name"] = str(info.get("\u80a1\u7968\u7b80\u79f0", ""))
-                        if not profile["name_zh"]:
-                            profile["name_zh"] = profile["name"]
+                    streak_429 = 0
+                    if info:
+                        _, market = _cn_code_to_symbol(code)
+                        profiles.append({
+                            "symbol": symbol,
+                            "market": market,
+                            "name": info["name"],
+                            "name_zh": name_zh or info["name"],
+                            "sector": info["sector"],
+                            "industry": info["industry"],
+                            "concepts": concepts_dict.get(code, []),
+                            "main_business": info["description"],
+                            "description": info["description"],
+                        })
                     break
                 except Exception as e:
                     if _is_rate_limit_error(e):
-                        info_429_streak += 1
-                        wait = 30 * (attempt + 1)
-                        logger.warning(
-                            "[StockProfile] 429 on stock info %s (streak=%d), "
-                            "waiting %ds...",
-                            code, info_429_streak, wait,
-                        )
-                        if info_429_streak >= _MAX_429_STREAK:
-                            logger.error(
-                                "[StockProfile] Too many 429s, aborting CN info"
-                            )
-                            info_abort.set()
-                            profiles.append(profile)
+                        streak_429 += 1
+                        if streak_429 >= _MAX_429_STREAK:
+                            logger.error("[StockProfile] Too many 429s, aborting CN")
+                            abort_event.set()
                             return
-                        await asyncio.sleep(wait)
+                        await asyncio.sleep(30 * (attempt + 1))
                         continue
-                    info_errors += 1
-                    if info_errors <= 10:
-                        logger.warning(
-                            "[StockProfile] Error fetching info for %s: %s",
-                            code, e,
-                        )
+                    errors += 1
+                    if errors <= 10:
+                        logger.warning("[StockProfile] CN error for %s: %s", symbol, e)
                     break
+            await asyncio.sleep(0.3)
 
-            profiles.append(profile)
-            await asyncio.sleep(1.0)
-
-    # Process stocks in batches
-    stock_items = list(concepts_dict.items())
     batch_size = 20
-    for i in range(0, len(stock_items), batch_size):
-        batch = stock_items[i : i + batch_size]
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
         await asyncio.gather(
-            *[fetch_stock_info(code, concepts) for code, concepts in batch],
+            *[fetch_profile(sym, nzh) for sym, nzh in batch],
             return_exceptions=True,
         )
-        if i % 200 == 0 and i > 0:
+        if i % 500 == 0 and i > 0:
             logger.info(
-                "[StockProfile] Fetched info for %d/%d CN stocks",
-                i, len(stock_items),
+                "[StockProfile] Fetched %d/%d CN profiles (%d errors)",
+                len(profiles), i, errors,
             )
 
     elapsed = time.monotonic() - t0
     logger.info(
-        "[StockProfile] CN collection complete: %d profiles in %.0fs "
-        "(info_errors=%d)",
-        len(profiles), elapsed, info_errors,
+        "[StockProfile] CN collection complete: %d profiles in %.0fs (errors=%d)",
+        len(profiles), elapsed, errors,
     )
     return profiles
 
 
 # ---------------------------------------------------------------------------
-# US profiles: yfinance Ticker info (monolithic, legacy)
+# US profiles: Yahoo quoteSummary (assetProfile + quoteType)
 # ---------------------------------------------------------------------------
 
 async def collect_us_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
-    """Collect US stock profiles via yfinance.
-
-    Monolithic version -- processes all symbols in one call.
-    Prefer ``fetch_us_profiles_batch()`` for granular batching.
-    """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.warning("[StockProfile] yfinance not installed, skipping US")
-        return []
-
+    """Collect US stock profiles via Yahoo quoteSummary (1 HTTP req per symbol)."""
     symbols = symbols[:5000]
-    logger.info("[StockProfile] Starting US profile collection for %d symbols", len(symbols))
+    logger.info("[StockProfile] Starting US profile collection: %d symbols", len(symbols))
     t0 = time.monotonic()
 
     profiles: List[Dict[str, Any]] = []
@@ -335,55 +345,39 @@ async def collect_us_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
                 return
             for attempt in range(3):
                 try:
-                    def _get_info(s: str = symbol) -> Optional[Dict[str, Any]]:
-                        ticker = yf.Ticker(s)
-                        return ticker.info
-
-                    info = await run_in_executor(_get_info, timeout=30.0)
+                    info = await run_in_executor(
+                        lambda s=symbol: _fetch_yahoo_profile_sync(s),
+                        timeout=30.0,
+                    )
                     streak_429 = 0
-                    if info and isinstance(info, dict):
-                        name = info.get("shortName") or info.get("longName", "")
-                        if name:
-                            biz_summary = info.get("longBusinessSummary", "")[:500]
-                            profiles.append({
-                                "symbol": symbol,
-                                "market": "us",
-                                "name": name,
-                                "name_zh": "",
-                                "sector": info.get("sector", ""),
-                                "industry": info.get("industry", ""),
-                                "concepts": [],
-                                "main_business": biz_summary,
-                                "description": biz_summary,
-                            })
+                    if info:
+                        profiles.append({
+                            "symbol": symbol,
+                            "market": "us",
+                            "name": info["name"],
+                            "name_zh": "",
+                            "sector": info["sector"],
+                            "industry": info["industry"],
+                            "concepts": [],
+                            "main_business": info["description"],
+                            "description": info["description"],
+                        })
                     break
                 except Exception as e:
                     if _is_rate_limit_error(e):
                         streak_429 += 1
-                        wait = 30 * (attempt + 1)
-                        logger.warning(
-                            "[StockProfile] yfinance 429 for %s (streak=%d), "
-                            "waiting %ds...",
-                            symbol, streak_429, wait,
-                        )
                         if streak_429 >= _MAX_429_STREAK:
-                            logger.error(
-                                "[StockProfile] Too many yfinance 429s, "
-                                "aborting US collection"
-                            )
+                            logger.error("[StockProfile] Too many 429s, aborting US")
                             abort_event.set()
                             return
-                        await asyncio.sleep(wait)
+                        await asyncio.sleep(30 * (attempt + 1))
                         continue
                     errors += 1
                     if errors <= 10:
-                        logger.warning(
-                            "[StockProfile] yfinance error for %s: %s", symbol, e,
-                        )
+                        logger.warning("[StockProfile] US error for %s: %s", symbol, e)
                     break
             await asyncio.sleep(0.3)
 
-    # Process in batches
     batch_size = 20
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i : i + batch_size]
@@ -406,21 +400,11 @@ async def collect_us_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# HK profiles: yfinance Ticker info (monolithic, legacy)
+# HK profiles: Yahoo quoteSummary (assetProfile + quoteType)
 # ---------------------------------------------------------------------------
 
 async def collect_hk_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
-    """Collect HK stock profiles via yfinance.
-
-    Monolithic version -- processes all symbols in one call.
-    Prefer ``fetch_hk_profiles_batch()`` for granular batching.
-    """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.warning("[StockProfile] yfinance not installed, skipping HK")
-        return []
-
+    """Collect HK stock profiles via Yahoo quoteSummary (1 HTTP req per symbol)."""
     symbols = symbols[:500]
     logger.info("[StockProfile] Starting HK profile collection for %d symbols", len(symbols))
     t0 = time.monotonic()
@@ -430,7 +414,7 @@ async def collect_hk_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
     yf_symbols: List[str] = []
     for s in symbols:
         code, _, suffix = s.partition(".")
-        yf_code = code.lstrip("0").zfill(4)  # 00700 -> 0700, 09988 -> 9988
+        yf_code = code.lstrip("0").zfill(4)
         yf_sym = f"{yf_code}.{suffix}" if suffix else yf_code
         yf_to_canonical[yf_sym] = s
         yf_symbols.append(yf_sym)
@@ -450,57 +434,40 @@ async def collect_hk_profiles(symbols: List[str]) -> List[Dict[str, Any]]:
                 return
             for attempt in range(3):
                 try:
-                    def _get_info(s: str = yf_symbol) -> Optional[Dict[str, Any]]:
-                        ticker = yf.Ticker(s)
-                        return ticker.info
-
-                    info = await run_in_executor(_get_info, timeout=30.0)
+                    info = await run_in_executor(
+                        lambda s=yf_symbol: _fetch_yahoo_profile_sync(s),
+                        timeout=30.0,
+                    )
                     streak_429 = 0
-                    if info and isinstance(info, dict):
-                        name = info.get("shortName") or info.get("longName", "")
-                        if name:
-                            canonical = yf_to_canonical.get(yf_symbol, yf_symbol)
-                            biz_summary = info.get("longBusinessSummary", "")[:500]
-                            profiles.append({
-                                "symbol": canonical,
-                                "market": "hk",
-                                "name": name,
-                                "name_zh": "",
-                                "sector": info.get("sector", ""),
-                                "industry": info.get("industry", ""),
-                                "concepts": [],
-                                "main_business": biz_summary,
-                                "description": biz_summary,
-                            })
+                    if info:
+                        canonical = yf_to_canonical.get(yf_symbol, yf_symbol)
+                        profiles.append({
+                            "symbol": canonical,
+                            "market": "hk",
+                            "name": info["name"],
+                            "name_zh": "",
+                            "sector": info["sector"],
+                            "industry": info["industry"],
+                            "concepts": [],
+                            "main_business": info["description"],
+                            "description": info["description"],
+                        })
                     break
                 except Exception as e:
                     if _is_rate_limit_error(e):
                         streak_429 += 1
-                        wait = 30 * (attempt + 1)
-                        logger.warning(
-                            "[StockProfile] yfinance 429 for %s (streak=%d), "
-                            "waiting %ds...",
-                            yf_symbol, streak_429, wait,
-                        )
                         if streak_429 >= _MAX_429_STREAK:
-                            logger.error(
-                                "[StockProfile] Too many yfinance 429s, "
-                                "aborting HK collection"
-                            )
+                            logger.error("[StockProfile] Too many 429s, aborting HK")
                             abort_event.set()
                             return
-                        await asyncio.sleep(wait)
+                        await asyncio.sleep(30 * (attempt + 1))
                         continue
                     errors += 1
                     if errors <= 10:
-                        logger.warning(
-                            "[StockProfile] yfinance error for %s: %s",
-                            yf_symbol, e,
-                        )
+                        logger.warning("[StockProfile] HK error for %s: %s", yf_symbol, e)
                     break
             await asyncio.sleep(0.5)
 
-    # Process in batches
     batch_size = 10
     for i in range(0, len(yf_symbols), batch_size):
         batch = yf_symbols[i : i + batch_size]

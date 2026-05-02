@@ -1050,8 +1050,8 @@ class AKShareProvider(DataProvider):
                         "source": "akshare",
                     }
                 except Exception as e:
-                    logger.error(
-                        "AKShare northbound holding error: %s", e
+                    logger.debug(
+                        "AKShare northbound holding skipped %s: %s", code, e
                     )
                     return None
 
