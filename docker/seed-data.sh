@@ -9,7 +9,7 @@
 
 set -e
 
-RELEASE_TAG="${SP_SEED_RELEASE:-data-2026-04-29}"
+RELEASE_TAG="${SP_SEED_RELEASE:-data-2026-05-02}"
 RELEASE_REPO="${SP_SEED_REPO:-avesed/stockpulse}"
 BASE_URL="https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}"
 
@@ -41,13 +41,19 @@ FILES=(
   "cn-stock-symbols.csv.gz:stock_symbols"
   "metal-stock-symbols.csv.gz:stock_symbols"
   "us-stock-profiles.csv.gz:stock_profiles"
+  "hk-stock-profiles.csv.gz:stock_profiles"
+  "cn-stock-profiles.csv.gz:stock_profiles"
   "us-stock-daily-bars.csv.gz:stock_daily_bars"
   "hk-stock-daily-bars.csv.gz:stock_daily_bars"
   "cn-stock-daily-bars.csv.gz:stock_daily_bars"
   "metal-stock-daily-bars.csv.gz:stock_daily_bars"
   "us-stock-fundamentals.csv.gz:stock_fundamentals"
+  "hk-stock-fundamentals.csv.gz:stock_fundamentals"
+  "cn-stock-fundamentals.csv.gz:stock_fundamentals"
   "us-analyst-ratings.csv.gz:analyst_ratings"
+  "hk-analyst-ratings.csv.gz:analyst_ratings"
   "us-institutional-holders.csv.gz:institutional_holders"
+  "hk-institutional-holders.csv.gz:institutional_holders"
   "cn-fund-holdings.csv.gz:fund_holdings"
   "cn-northbound-holdings.csv.gz:northbound_holdings"
 )
