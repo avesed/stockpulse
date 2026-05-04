@@ -259,6 +259,103 @@ def _build_scheduler() -> None:
         **_job_kwargs,
     )
 
+    # --- ML data collection jobs ---
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(hour=23, minute=30),
+        args=["macro_daily", "global"], id="ml_macro",
+        name="ML: macro indicators", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(hour=0, minute=30),
+        args=["earnings_calendar", "us"], id="ml_earnings_cal",
+        name="ML: earnings calendar", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(hour=1, minute=0),
+        args=["economic_indicators", "global"], id="ml_econ",
+        name="ML: economic indicators", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(hour=23, minute=0),
+        args=["options_sentiment", "us"], id="ml_options_us",
+        name="ML: US options sentiment", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="mon-fri", hour=9, minute=0),
+        args=["cn_alternative", "cn"], id="ml_cn_alt",
+        name="ML: CN alternative data", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="mon", hour=2, minute=0),
+        args=["insider_sentiment", "us"], id="ml_insider_sent",
+        name="ML: insider sentiment", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="tue", hour=2, minute=0),
+        args=["recommendation_trends", "us"], id="ml_rec_trends",
+        name="ML: recommendation trends", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="wed", hour=2, minute=0),
+        args=["earnings_surprises", "us"], id="ml_eps_surprise",
+        name="ML: earnings surprises", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="thu", hour=2, minute=0),
+        args=["upgrades_downgrades", "us"], id="ml_upgrades_us",
+        name="ML: US upgrades/downgrades", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="thu", hour=3, minute=30),
+        args=["upgrades_downgrades", "cn"], id="ml_upgrades_cn",
+        name="ML: CN upgrades/downgrades", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="thu", hour=4, minute=0),
+        args=["upgrades_downgrades", "hk"], id="ml_upgrades_hk",
+        name="ML: HK upgrades/downgrades", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day_of_week="fri", hour=1, minute=0),
+        args=["short_interest", "us"], id="ml_short_int",
+        name="ML: short interest", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day="1,15", hour=1, minute=0),
+        args=["valuation_history", "us"], id="ml_valuation_us",
+        name="ML: US valuation history (Finnhub)", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day="1,15", hour=11, minute=0),
+        args=["valuation_history", "cn"], id="ml_valuation_cn",
+        name="ML: CN valuation history (YF)", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day="1,15", hour=12, minute=0),
+        args=["valuation_history", "hk"], id="ml_valuation_hk",
+        name="ML: HK valuation history (YF)", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day=1, hour=3, minute=0),
+        args=["insider_transactions", "us"], id="ml_insider_tx_us",
+        name="ML: US insider transactions", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day=1, hour=5, minute=0),
+        args=["insider_transactions", "cn"], id="ml_insider_tx_cn",
+        name="ML: CN insider transactions", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day=1, hour=5, minute=30),
+        args=["insider_transactions", "hk"], id="ml_insider_tx_hk",
+        name="ML: HK insider transactions", **_job_kwargs,
+    )
+    _scheduler.add_job(
+        _run_ml_collect, CronTrigger(day=1, hour=4, minute=0),
+        args=["sec_financials", "us"], id="ml_sec_fin",
+        name="ML: SEC financials", **_job_kwargs,
+    )
+
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
 
@@ -528,3 +625,22 @@ async def _run_concept_sync() -> None:
         )
     except Exception as exc:
         logger.exception("Scheduler: concept board sync failed: %s", exc)
+
+
+async def _run_ml_collect(job_type: str, market: str) -> None:
+    if not _is_leader:
+        return
+    logger.info("Scheduler: starting ML collect %s/%s", job_type, market)
+    try:
+        from app.services import ml_collection_service
+        fn = getattr(ml_collection_service, f"collect_{job_type}", None)
+        if fn is None:
+            logger.error("Scheduler: unknown ML job type: %s", job_type)
+            return
+        result = await fn(market, triggered_by="scheduler")
+        logger.info(
+            "Scheduler: ML collect %s/%s complete — %s",
+            job_type, market, result,
+        )
+    except Exception as exc:
+        logger.exception("Scheduler: ML collect %s/%s failed: %s", job_type, market, exc)

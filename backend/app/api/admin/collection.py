@@ -587,3 +587,80 @@ async def download_concept_mapping() -> dict[str, Any]:
         "names": mapping.get("names", {}),
         "count": len(mapping.get("concepts", {})),
     }
+
+
+# -----------------------------------------------------------------------
+# ML Data Collection
+# -----------------------------------------------------------------------
+_VALID_ML_JOBS = {
+    "valuation_history", "insider_sentiment", "insider_transactions",
+    "earnings_surprises", "recommendation_trends", "upgrades_downgrades",
+    "sec_financials", "earnings_calendar", "options_sentiment",
+    "short_interest", "economic_indicators", "macro_daily",
+    "cn_alternative",
+}
+_running_ml_tasks: dict[str, asyncio.Task] = {}
+
+
+def _cleanup_ml_task(key: str, task: asyncio.Task) -> None:
+    _running_ml_tasks.pop(key, None)
+
+
+@router.post("/ml/{job_type}/{market}/collect")
+async def trigger_ml_collect(job_type: str, market: str) -> dict[str, Any]:
+    """Trigger an ML data collection job."""
+    job_type = job_type.lower()
+    market = market.lower()
+    if job_type not in _VALID_ML_JOBS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown ML job: {job_type}. Use: {', '.join(sorted(_VALID_ML_JOBS))}",
+        )
+
+    task_key = f"ml_{job_type}_{market}"
+    existing = _running_ml_tasks.get(task_key)
+    if existing is not None and not existing.done():
+        return {"status": "already_running", "jobType": job_type, "market": market}
+
+    from app.services import ml_collection_service
+
+    fn = getattr(ml_collection_service, f"collect_{job_type}", None)
+    if fn is None:
+        raise HTTPException(status_code=400, detail=f"No collect function for {job_type}")
+
+    task = asyncio.create_task(fn(market, triggered_by="api"), name=task_key)
+    task.add_done_callback(lambda t: _cleanup_ml_task(task_key, t))
+    _running_ml_tasks[task_key] = task
+
+    return {"status": "started", "jobType": job_type, "market": market}
+
+
+@router.get("/ml/{job_type}/{market}/progress")
+async def get_ml_progress(job_type: str, market: str) -> dict[str, Any]:
+    """Get ML collection job progress."""
+    from app.services import ml_collection_service
+
+    raw = await ml_collection_service.get_progress(job_type.lower(), market.lower())
+    task_key = f"ml_{job_type.lower()}_{market.lower()}"
+    task_running = task_key in _running_ml_tasks and not _running_ml_tasks[task_key].done()
+
+    progress = None
+    if raw and "symbolsDone" in raw:
+        progress = {
+            "current": raw.get("symbolsDone", 0),
+            "total": raw.get("symbolsTotal", 0),
+            "message": f"{raw.get('upserted', 0)} upserted",
+            "elapsedSeconds": raw.get("elapsedSeconds"),
+            "errorsCount": raw.get("errorsCount", 0),
+        }
+
+    return {"jobType": job_type, "market": market, "progress": progress, "taskRunning": task_running}
+
+
+@router.post("/ml/{job_type}/{market}/unlock")
+async def force_ml_unlock(job_type: str, market: str) -> dict[str, Any]:
+    """Force-release ML collection job lock."""
+    from app.services import ml_collection_service
+
+    released = await ml_collection_service.force_unlock(job_type.lower(), market.lower())
+    return {"released": released, "jobType": job_type, "market": market}

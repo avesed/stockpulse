@@ -1726,3 +1726,244 @@ class AKShareProvider(DataProvider):
         except Exception as e:
             logger.warning("akshare news error: %s", e)
             return []
+
+    # === Market-wide Sentiment / Flow Methods ===
+
+    async def get_margin_trading(
+        self, start_date: str, end_date: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get market-wide margin trading data from SSE."""
+        try:
+            import akshare as ak
+
+            def fetch():
+                return ak.stock_margin_sse(
+                    start_date=start_date, end_date=end_date
+                )
+
+            df = await run_in_executor(fetch, timeout=60)
+            if df is None or df.empty:
+                return None
+
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    "date": str(row.get("信用交易日期", ""))[:10],
+                    "margin_balance": (
+                        float(row["融资余额"])
+                        if pd.notna(row.get("融资余额")) else None
+                    ),
+                    "margin_buy": (
+                        float(row["融资买入额"])
+                        if pd.notna(row.get("融资买入额")) else None
+                    ),
+                    "short_sell_qty": (
+                        float(row["融券余量"])
+                        if pd.notna(row.get("融券余量")) else None
+                    ),
+                    "short_sell_value": (
+                        float(row["融券余量金额"])
+                        if pd.notna(row.get("融券余量金额")) else None
+                    ),
+                    "short_sell_volume": (
+                        float(row["融券卖出量"])
+                        if pd.notna(row.get("融券卖出量")) else None
+                    ),
+                    "total_balance": (
+                        float(row["融资融券余额"])
+                        if pd.notna(row.get("融资融券余额")) else None
+                    ),
+                })
+            return results
+        except Exception as e:
+            logger.warning("AKShare margin trading error: %s", e)
+            return None
+
+    async def get_stock_connect_flow(
+        self, direction: str, days: int = 30
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get daily Stock Connect capital flow (沪股通/深股通)."""
+        try:
+            import akshare as ak
+
+            def fetch():
+                return ak.stock_hsgt_hist_em(symbol=direction)
+
+            df = await run_in_executor(fetch, timeout=60)
+            if df is None or df.empty:
+                return None
+
+            df = df.tail(days)
+
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    "date": str(row.get("日期", ""))[:10],
+                    "net_buy": (
+                        float(row["当日成交净买额"])
+                        if pd.notna(row.get("当日成交净买额")) else None
+                    ),
+                    "buy_amount": (
+                        float(row["买入成交额"])
+                        if pd.notna(row.get("买入成交额")) else None
+                    ),
+                    "sell_amount": (
+                        float(row["卖出成交额"])
+                        if pd.notna(row.get("卖出成交额")) else None
+                    ),
+                    "cumulative_net_buy": (
+                        float(row["历史累计净买额"])
+                        if pd.notna(row.get("历史累计净买额")) else None
+                    ),
+                    "holding_value": (
+                        float(row["持股市值"])
+                        if pd.notna(row.get("持股市值")) else None
+                    ),
+                })
+            return results
+        except Exception as e:
+            logger.warning("AKShare stock connect flow error: %s", e)
+            return None
+
+    async def get_shareholder_count(
+        self, quarter_date: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get shareholder concentration data for all A-shares."""
+        try:
+            import akshare as ak
+
+            def fetch():
+                return ak.stock_zh_a_gdhs(symbol=quarter_date)
+
+            df = await run_in_executor(fetch, timeout=60)
+            if df is None or df.empty:
+                return None
+
+            results = []
+            for _, row in df.iterrows():
+                code = str(row.get("代码", ""))
+                if code.startswith("6"):
+                    sym = code + ".SS"
+                else:
+                    sym = code + ".SZ"
+
+                results.append({
+                    "symbol": sym,
+                    "name": row.get("名称"),
+                    "current_count": (
+                        int(row["股东户数-本次"])
+                        if pd.notna(row.get("股东户数-本次")) else None
+                    ),
+                    "prior_count": (
+                        int(row["股东户数-上次"])
+                        if pd.notna(row.get("股东户数-上次")) else None
+                    ),
+                    "change": (
+                        int(row["股东户数-增减"])
+                        if pd.notna(row.get("股东户数-增减")) else None
+                    ),
+                    "change_pct": (
+                        float(row["股东户数-增减比例"])
+                        if pd.notna(row.get("股东户数-增减比例")) else None
+                    ),
+                    "avg_holding_value": (
+                        float(row["户均持股市值"])
+                        if pd.notna(row.get("户均持股市值")) else None
+                    ),
+                    "avg_holding_shares": (
+                        float(row["户均持股数量"])
+                        if pd.notna(row.get("户均持股数量")) else None
+                    ),
+                    "report_date": (
+                        str(row["公告日期"])[:10]
+                        if pd.notna(row.get("公告日期")) else None
+                    ),
+                })
+            return results
+        except Exception as e:
+            logger.warning("AKShare shareholder count error: %s", e)
+            return None
+
+    async def get_dragon_tiger(
+        self, start_date: str, end_date: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get dragon-tiger board (top trader activity) data."""
+        try:
+            import akshare as ak
+
+            def fetch():
+                return ak.stock_lhb_detail_em(
+                    start_date=start_date, end_date=end_date
+                )
+
+            df = await run_in_executor(fetch, timeout=60)
+            if df is None or df.empty:
+                return None
+
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    "symbol": str(row.get("代码", "")),
+                    "name": row.get("名称"),
+                    "date": str(row.get("上榜日", ""))[:10],
+                    "close": (
+                        float(row["收盘价"])
+                        if pd.notna(row.get("收盘价")) else None
+                    ),
+                    "change_pct": (
+                        float(row["涨跌幅"])
+                        if pd.notna(row.get("涨跌幅")) else None
+                    ),
+                    "net_buy": (
+                        float(row["龙虎榜净买额"])
+                        if pd.notna(row.get("龙虎榜净买额")) else None
+                    ),
+                })
+            return results
+        except Exception as e:
+            logger.warning("AKShare dragon tiger error: %s", e)
+            return None
+
+    async def get_block_trades(
+        self, start_date: str, end_date: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get large block trade data."""
+        try:
+            import akshare as ak
+
+            def fetch():
+                return ak.stock_dzjy_mrtj(
+                    start_date=start_date, end_date=end_date
+                )
+
+            df = await run_in_executor(fetch, timeout=60)
+            if df is None or df.empty:
+                return None
+
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    "date": str(row.get("交易日期", ""))[:10],
+                    "symbol": str(row.get("证券代码", "")),
+                    "name": row.get("证券简称"),
+                    "change_pct": (
+                        float(row["涨跌幅"])
+                        if pd.notna(row.get("涨跌幅")) else None
+                    ),
+                    "close": (
+                        float(row["收盘价"])
+                        if pd.notna(row.get("收盘价")) else None
+                    ),
+                    "trade_price": (
+                        float(row["成交价"])
+                        if pd.notna(row.get("成交价")) else None
+                    ),
+                    "premium_rate": (
+                        float(row["折溢率"])
+                        if pd.notna(row.get("折溢率")) else None
+                    ),
+                })
+            return results
+        except Exception as e:
+            logger.warning("AKShare block trades error: %s", e)
+            return None

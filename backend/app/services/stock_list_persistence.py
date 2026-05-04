@@ -74,7 +74,20 @@ async def build_and_save_stock_list() -> Dict[str, Any]:
             seen.add(sym)
             unique.append(stock)
 
-    # 3. Write to PostgreSQL
+    # 3. Safety check: refuse to overwrite if new data is drastically smaller
+    from app.core.database import get_db_pool
+    pool = get_db_pool()
+    existing_count = await pool.fetchval("SELECT COUNT(*) FROM stock_symbols")
+    if existing_count > 1000 and len(unique) < existing_count * 0.5:
+        msg = (
+            f"Refusing to overwrite stock_symbols: existing={existing_count}, "
+            f"new={len(unique)} (< 50% of existing). Data source may be incomplete."
+        )
+        logger.error(msg)
+        await _set_progress("failed", msg)
+        return {"status": "error", "reason": "safety_check_failed", "detail": msg}
+
+    # 4. Write to PostgreSQL
     await _save_to_db(unique)
 
     # 4. Set Redis version
@@ -142,13 +155,10 @@ async def is_table_empty() -> bool:
 
 
 async def _save_to_db(stocks: List[Dict[str, Any]]) -> None:
-    """Write stocks to the ``stock_symbols`` table using TRUNCATE + INSERT.
+    """Write stocks to ``stock_symbols`` using upsert (ON CONFLICT DO UPDATE).
 
-    Runs inside a single transaction: TRUNCATE first, then INSERT in chunks.
-    If anything fails, the entire operation rolls back (old data preserved).
-
-    Raises:
-        RuntimeError: If the database write fails.
+    Never truncates — only inserts new symbols and updates existing ones.
+    This prevents data loss when a data source returns partial results.
     """
     from app.core.database import get_db_pool
 
@@ -157,32 +167,36 @@ async def _save_to_db(stocks: List[Dict[str, Any]]) -> None:
     sql = (
         "INSERT INTO stock_symbols "
         "(symbol, name, name_zh, exchange, market, pinyin, pinyin_initial, updated_at) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) "
+        "ON CONFLICT (symbol) DO UPDATE SET "
+        "name = COALESCE(NULLIF(EXCLUDED.name, ''), stock_symbols.name), "
+        "name_zh = COALESCE(NULLIF(EXCLUDED.name_zh, ''), stock_symbols.name_zh), "
+        "exchange = COALESCE(NULLIF(EXCLUDED.exchange, ''), stock_symbols.exchange), "
+        "market = EXCLUDED.market, "
+        "pinyin = COALESCE(NULLIF(EXCLUDED.pinyin, ''), stock_symbols.pinyin), "
+        "pinyin_initial = COALESCE(NULLIF(EXCLUDED.pinyin_initial, ''), stock_symbols.pinyin_initial), "
+        "updated_at = NOW()"
     )
 
     try:
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("TRUNCATE stock_symbols")
+            for i in range(0, len(stocks), _INSERT_CHUNK_SIZE):
+                chunk = stocks[i : i + _INSERT_CHUNK_SIZE]
+                rows = [
+                    (
+                        s.get("symbol", ""),
+                        s.get("name", ""),
+                        s.get("name_zh", ""),
+                        s.get("exchange", ""),
+                        s.get("market", ""),
+                        s.get("pinyin", ""),
+                        s.get("pinyin_initial", ""),
+                    )
+                    for s in chunk
+                ]
+                await conn.executemany(sql, rows)
 
-                # Insert in chunks
-                for i in range(0, len(stocks), _INSERT_CHUNK_SIZE):
-                    chunk = stocks[i : i + _INSERT_CHUNK_SIZE]
-                    rows = [
-                        (
-                            s.get("symbol", ""),
-                            s.get("name", ""),
-                            s.get("name_zh", ""),
-                            s.get("exchange", ""),
-                            s.get("market", ""),
-                            s.get("pinyin", ""),
-                            s.get("pinyin_initial", ""),
-                        )
-                        for s in chunk
-                    ]
-                    await conn.executemany(sql, rows)
-
-        logger.info("Saved %d stocks to stock_symbols table", len(stocks))
+        logger.info("Upserted %d stocks to stock_symbols table", len(stocks))
 
     except Exception as e:
         logger.exception("Failed to save stock list to DB: %s", e)

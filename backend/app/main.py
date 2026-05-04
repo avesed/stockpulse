@@ -62,6 +62,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await load_api_keys_from_db()
     start_subscriber()
 
+    # Start provider rate-limit queues (must be after API keys are loaded)
+    from app.core.provider_queue import start_queues, stop_queues
+    await start_queues()
+
     # Start executor watchdog (3-pool health monitoring)
     from app.core.executor import start_watchdog, stop_watchdog, shutdown_executor
     start_watchdog()
@@ -88,6 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await stop_all_collectors()
     await stop_fanout_subscriber()
     await stop_scheduler()
+    await stop_queues()
     await stop_watchdog()
     await stop_subscriber()
     shutdown_executor()
@@ -133,6 +138,8 @@ from app.api.public.reference import router as reference_router  # noqa: E402
 from app.api.public.internal import router as internal_router  # noqa: E402
 from app.api.public.news import router as news_router  # noqa: E402
 from app.api.public.health_summary import router as health_summary_router  # noqa: E402
+from app.api.public.ml_data import router as ml_data_router  # noqa: E402
+from app.api.public.ml_data import queue_stats_router as ml_queue_stats_router  # noqa: E402
 
 # Admin collection router (JWT auth)
 from app.api.admin.collection import router as collection_router  # noqa: E402
@@ -152,6 +159,8 @@ app.include_router(reference_router)
 app.include_router(internal_router)
 app.include_router(news_router)
 app.include_router(health_summary_router)
+app.include_router(ml_data_router)
+app.include_router(ml_queue_stats_router)
 app.include_router(collection_router)
 
 # Per-provider data API routers (X-API-Key auth, direct provider access)

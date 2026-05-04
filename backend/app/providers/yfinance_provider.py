@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional, Set
 import pandas as pd
 
 from app.core.redis import cache_get, cache_set, jittered_ttl
-from app.core.executor import run_in_executor
+from app.core.executor import ExecutorPool
+from app.core.provider_queue import Priority, submit
 from app.providers.base import DataProvider
 from app.providers.constants import (
     HK,
@@ -110,7 +111,7 @@ class YFinanceProvider(DataProvider):
                     return None
                 return info
 
-            info = await run_in_executor(fetch)
+            info = await submit("yfinance", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not info:
                 return None
 
@@ -176,7 +177,7 @@ class YFinanceProvider(DataProvider):
                     df = ticker.history(period=period, interval=interval)
                 return df
 
-            df = await run_in_executor(fetch)
+            df = await submit("yfinance", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if df is None or df.empty:
                 return None
 
@@ -223,7 +224,7 @@ class YFinanceProvider(DataProvider):
                     }]
                 return []
 
-            results = await run_in_executor(fetch)
+            results = await submit("yfinance", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             return [
                 {
                     "symbol": r["symbol"],
@@ -268,7 +269,7 @@ class YFinanceProvider(DataProvider):
                 ticker = yf.Ticker(symbol)
                 return ticker.info
 
-            info = await run_in_executor(fetch)
+            info = await submit("yfinance", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not info or not info.get("shortName"):
                 return None
 
@@ -305,7 +306,7 @@ class YFinanceProvider(DataProvider):
                 ticker = yf.Ticker(symbol)
                 return ticker.info
 
-            info = await run_in_executor(fetch)
+            info = await submit("yfinance", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not info:
                 return None
 
@@ -394,7 +395,7 @@ class YFinanceProvider(DataProvider):
                     "source": "yfinance",
                 }
 
-            return await run_in_executor(_fetch_sync)
+            return await submit("yfinance", _fetch_sync, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
         return await self._cached_or_fetch("analyst_ratings", symbol, fetch)
 
@@ -416,7 +417,7 @@ class YFinanceProvider(DataProvider):
             def _fetch():
                 return yf.Ticker(symbol).info
 
-            info = await run_in_executor(_fetch)
+            info = await submit("yfinance", _fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not info:
                 return {"financials": None, "analyst": None}
 
@@ -514,7 +515,7 @@ class YFinanceProvider(DataProvider):
                     "source": "yfinance",
                 }
 
-            return await run_in_executor(_fetch_sync)
+            return await submit("yfinance", _fetch_sync, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
         return await self._cached_or_fetch("technical_info", symbol, fetch)
 
@@ -585,7 +586,7 @@ class YFinanceProvider(DataProvider):
                     "source": "yfinance",
                 }
 
-            return await run_in_executor(_fetch_sync)
+            return await submit("yfinance", _fetch_sync, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
         return await self._cached_or_fetch(
             "institutional_holders", symbol, fetch
@@ -639,7 +640,7 @@ class YFinanceProvider(DataProvider):
                     "source": "yfinance",
                 }
 
-            return await run_in_executor(_fetch_sync)
+            return await submit("yfinance", _fetch_sync, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
         cache_key = f"{index_symbol}:{period}"
         return await self._cached_or_fetch("market_index", cache_key, fetch)
@@ -687,7 +688,7 @@ class YFinanceProvider(DataProvider):
             def _fetch():
                 return yf.Ticker(symbol).news or []
 
-            items = await run_in_executor(_fetch)
+            items = await submit("yfinance", _fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not items:
                 return []
 
@@ -796,7 +797,293 @@ class YFinanceProvider(DataProvider):
                     "source": "yfinance",
                 }
 
-            return await run_in_executor(_fetch_sync)
+            return await submit("yfinance", _fetch_sync, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
         # No caching for this simple call as it's part of other cached operations
         return await fetch()
+
+    # === ML Data Methods ===
+
+    async def get_insider_transactions(
+        self, symbol: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get insider transactions (buys/sells) for ML feature extraction."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                df = ticker.insider_transactions
+                if df is None or df.empty:
+                    return None
+
+                results = []
+                for _, row in df.iterrows():
+                    text = row.get("Text", "") if pd.notna(row.get("Text")) else ""
+                    # Parse transaction type: "Sale at price..." -> "Sale"
+                    tx_type = text.split(" at ")[0].split(" -")[0].strip() if text else None
+
+                    results.append({
+                        "date": (
+                            str(row["Start Date"])[:10]
+                            if pd.notna(row.get("Start Date"))
+                            else None
+                        ),
+                        "insider_name": (
+                            row["Insider"] if pd.notna(row.get("Insider")) else None
+                        ),
+                        "title": (
+                            row["Position"] if pd.notna(row.get("Position")) else None
+                        ),
+                        "transaction_type": tx_type,
+                        "shares": (
+                            int(row["Shares"]) if pd.notna(row.get("Shares")) else None
+                        ),
+                        "value": (
+                            float(row["Value"]) if pd.notna(row.get("Value")) else None
+                        ),
+                    })
+                return results or None
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance insider_transactions error for %s: %s", symbol, e)
+            return None
+
+    async def get_insider_purchases(
+        self, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get aggregated insider purchase/sale summary for ML features."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                df = ticker.insider_purchases
+                if df is None or df.empty:
+                    return None
+
+                # Build lookup from row labels
+                lookup: Dict[str, Any] = {}
+                for _, row in df.iterrows():
+                    label = row.iloc[0] if len(row) > 0 else ""
+                    val = row.iloc[1] if len(row) > 1 else None
+                    if pd.notna(val):
+                        lookup[str(label).strip()] = val
+
+                return {
+                    "purchases": lookup.get("Purchases"),
+                    "sales": lookup.get("Sales"),
+                    "net_shares": lookup.get("Net Shares Purchased (Sold)"),
+                    "total_held": lookup.get("Total Insider Shares Held"),
+                    "buy_pct": lookup.get("% Net Shares Purchased (Sold)"),
+                    "sell_pct": lookup.get("% Buy Shares"),
+                }
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance insider_purchases error for %s: %s", symbol, e)
+            return None
+
+    async def get_options_sentiment(
+        self, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get put/call volume and OI ratios from nearest-expiry options chain."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                expiries = ticker.options
+                if not expiries:
+                    return None
+
+                nearest = expiries[0]
+                chain = ticker.option_chain(nearest)
+
+                call_vol = int(chain.calls["volume"].fillna(0).sum())
+                put_vol = int(chain.puts["volume"].fillna(0).sum())
+                call_oi = int(chain.calls["openInterest"].fillna(0).sum())
+                put_oi = int(chain.puts["openInterest"].fillna(0).sum())
+
+                pc_ratio = round(put_vol / call_vol, 4) if call_vol > 0 else None
+                pc_oi_ratio = round(put_oi / call_oi, 4) if call_oi > 0 else None
+
+                return {
+                    "put_volume": put_vol,
+                    "call_volume": call_vol,
+                    "put_call_ratio": pc_ratio,
+                    "put_oi": put_oi,
+                    "call_oi": call_oi,
+                    "put_call_oi_ratio": pc_oi_ratio,
+                    "expiry": nearest,
+                }
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance options_sentiment error for %s: %s", symbol, e)
+            return None
+
+    async def get_upgrades_downgrades(
+        self, symbol: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get analyst upgrade/downgrade history (most recent 200)."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                df = ticker.upgrades_downgrades
+                if df is None or df.empty:
+                    return None
+
+                # Limit to 200 most recent entries
+                df = df.head(200)
+
+                results = []
+                for idx, row in df.iterrows():
+                    results.append({
+                        "date": (
+                            idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+                        ),
+                        "firm": row.get("Firm", "") if pd.notna(row.get("Firm")) else None,
+                        "to_grade": (
+                            row["ToGrade"] if pd.notna(row.get("ToGrade")) else None
+                        ),
+                        "from_grade": (
+                            row["FromGrade"] if pd.notna(row.get("FromGrade")) else None
+                        ),
+                        "action": (
+                            row["Action"] if pd.notna(row.get("Action")) else None
+                        ),
+                    })
+                return results or None
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance upgrades_downgrades error for %s: %s", symbol, e)
+            return None
+
+    async def get_valuation_measures(
+        self, symbol: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get quarterly valuation measures (P/E, P/B, EV/EBITDA, etc.)."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                df = ticker.get_valuation_measures()
+                if df is None or df.empty:
+                    return None
+
+                metric_map = {
+                    "Market Cap": "market_cap",
+                    "Enterprise Value": "enterprise_value",
+                    "Trailing P/E": "trailing_pe",
+                    "Forward P/E": "forward_pe",
+                    "PEG Ratio (5yr expected)": "peg_ratio",
+                    "Price/Sales": "price_to_sales",
+                    "Price/Book": "price_to_book",
+                    "Enterprise Value/Revenue": "ev_to_revenue",
+                    "Enterprise Value/EBITDA": "ev_to_ebitda",
+                }
+
+                def _parse_val(v):
+                    if v is None or (isinstance(v, float) and pd.isna(v)):
+                        return None
+                    s = str(v).strip()
+                    if not s or s == "—":
+                        return None
+                    multiplier = 1.0
+                    if s.endswith("T"):
+                        s, multiplier = s[:-1], 1e12
+                    elif s.endswith("B"):
+                        s, multiplier = s[:-1], 1e9
+                    elif s.endswith("M"):
+                        s, multiplier = s[:-1], 1e6
+                    elif s.endswith("K"):
+                        s, multiplier = s[:-1], 1e3
+                    try:
+                        return float(s) * multiplier
+                    except ValueError:
+                        return None
+
+                results = []
+                for col in df.columns:
+                    col_str = str(col)
+                    if col_str.lower() == "current":
+                        continue
+                    entry: Dict[str, Any] = {"date": col_str}
+                    for idx_label, key in metric_map.items():
+                        val = df.loc[idx_label, col] if idx_label in df.index else None
+                        entry[key] = _parse_val(val)
+                    results.append(entry)
+
+                return results or None
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance valuation_measures error for %s: %s", symbol, e)
+            return None
+
+    async def get_short_interest(
+        self, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get short interest data from ticker.info fields."""
+        try:
+            import yfinance as yf
+
+            def _fetch_sync():
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                if not info:
+                    return None
+
+                fields = {
+                    "short_percent_of_float": info.get("shortPercentOfFloat"),
+                    "short_ratio": info.get("shortRatio"),
+                    "shares_short": info.get("sharesShort"),
+                    "shares_short_prior_month": info.get("sharesShortPriorMonth"),
+                    "short_percent_of_shares_outstanding": info.get(
+                        "shortPercentOfSharesOutstanding"
+                    ),
+                    "date_short_interest": info.get("dateShortInterest"),
+                }
+
+                # Return None if every field is None
+                if all(v is None for v in fields.values()):
+                    return None
+
+                # Convert epoch timestamp to ISO date if present
+                dsi = fields["date_short_interest"]
+                if isinstance(dsi, (int, float)):
+                    from datetime import datetime as _dt
+                    fields["date_short_interest"] = (
+                        _dt.utcfromtimestamp(dsi).strftime("%Y-%m-%d")
+                    )
+
+                return fields
+
+            return await submit(
+                "yfinance", _fetch_sync,
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+        except Exception as e:
+            logger.warning("YFinance short_interest error for %s: %s", symbol, e)
+            return None

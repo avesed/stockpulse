@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.core.api_keys import get_api_key, get_api_keys, get_next_api_key, mark_key_rate_limited
 from app.core.redis import cache_get, cache_set, jittered_ttl
-from app.core.executor import run_in_executor
+from app.core.executor import ExecutorPool
+from app.core.provider_queue import Priority, submit
 from app.providers.base import DataProvider
 from app.providers.constants import US
 
@@ -132,7 +133,7 @@ class FinnhubProvider(DataProvider):
                         logger.warning("Finnhub quote error for %s: %s", symbol, e)
                     return None
 
-            q = await run_in_executor(fetch)
+            q = await submit("finnhub", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not q or q.get("c") is None or q.get("c") == 0:
                 return None
 
@@ -206,7 +207,7 @@ class FinnhubProvider(DataProvider):
                         logger.warning("Finnhub candles error for %s: %s", symbol, e)
                     return None
 
-            data = await run_in_executor(fetch)
+            data = await submit("finnhub", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not data or data.get("s") != "ok":
                 return None
 
@@ -261,7 +262,7 @@ class FinnhubProvider(DataProvider):
                         logger.warning("Finnhub search error for %s: %s", query, e)
                     return None
 
-            data = await run_in_executor(fetch)
+            data = await submit("finnhub", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not data or not data.get("result"):
                 return []
 
@@ -299,7 +300,7 @@ class FinnhubProvider(DataProvider):
                         logger.warning("Finnhub profile error for %s: %s", symbol, e)
                     return None
 
-            data = await run_in_executor(fetch)
+            data = await submit("finnhub", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not data or not data.get("name"):
                 return None
 
@@ -380,7 +381,7 @@ class FinnhubProvider(DataProvider):
                             )
                         return None
 
-                items = await run_in_executor(_fetch_sym)
+                items = await submit("finnhub", _fetch_sym, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             else:
                 def _fetch_global():
                     try:
@@ -394,7 +395,7 @@ class FinnhubProvider(DataProvider):
                             )
                         return None
 
-                items = await run_in_executor(_fetch_global)
+                items = await submit("finnhub", _fetch_global, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
 
             if not items:
                 return []
@@ -454,7 +455,7 @@ class FinnhubProvider(DataProvider):
                         logger.warning("Finnhub peers error for %s: %s", symbol, e)
                     return None
 
-            peers = await run_in_executor(fetch)
+            peers = await submit("finnhub", fetch, priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND)
             if not peers or not isinstance(peers, list):
                 return None
             # Exclude self
@@ -462,3 +463,274 @@ class FinnhubProvider(DataProvider):
         except Exception as e:
             logger.error("Finnhub peers error for %s: %s", symbol, e)
             return None
+
+    # ------------------------------------------------------------------
+    # ML / collection-oriented methods (SCHEDULED priority)
+    # ------------------------------------------------------------------
+
+    async def get_valuation_series(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Annual & quarterly valuation/margin/ratio time-series."""
+        if not self.is_available():
+            return None
+
+        client, key = self._get_client()
+        if not client:
+            return None
+
+        try:
+            def fetch():
+                try:
+                    return client.company_basic_financials(symbol, 'all')
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub valuation_series error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return None
+            return data.get("series") or None
+        except Exception as e:
+            logger.error("Finnhub valuation_series error for %s: %s", symbol, e)
+            return None
+
+    async def get_insider_sentiment(
+        self, symbol: str, from_date: str, to_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Monthly insider sentiment (MSPR & change)."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.stock_insider_sentiment(symbol, from_date, to_date)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub insider_sentiment error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("data") or []
+        except Exception as e:
+            logger.error("Finnhub insider_sentiment error for %s: %s", symbol, e)
+            return []
+
+    async def get_earnings_surprises(self, symbol: str) -> List[Dict[str, Any]]:
+        """Last 20 quarters of EPS actual vs estimate."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.company_earnings(symbol, limit=20)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub earnings_surprises error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data or not isinstance(data, list):
+                return []
+            return data
+        except Exception as e:
+            logger.error("Finnhub earnings_surprises error for %s: %s", symbol, e)
+            return []
+
+    async def get_recommendation_trends(self, symbol: str) -> List[Dict[str, Any]]:
+        """Analyst recommendation trends (buy/hold/sell breakdown)."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.recommendation_trends(symbol)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub recommendation_trends error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data or not isinstance(data, list):
+                return []
+            return data
+        except Exception as e:
+            logger.error("Finnhub recommendation_trends error for %s: %s", symbol, e)
+            return []
+
+    async def get_sec_financials(self, symbol: str) -> List[Dict[str, Any]]:
+        """SEC-filed quarterly financial statements (bs/ic/cf)."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.financials_reported(symbol=symbol, freq='quarterly')
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub sec_financials error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("data") or []
+        except Exception as e:
+            logger.error("Finnhub sec_financials error for %s: %s", symbol, e)
+            return []
+
+    async def get_earnings_calendar(
+        self, from_date: str, to_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Earnings calendar for a date range (not per-symbol)."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    import requests
+                    r = requests.get(
+                        "https://finnhub.io/api/v1/calendar/earnings",
+                        params={"from": from_date, "to": to_date, "token": key},
+                        timeout=15,
+                    )
+                    r.raise_for_status()
+                    return r.json()
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub earnings_calendar error: %s", e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("earningsCalendar") or []
+        except Exception as e:
+            logger.error("Finnhub earnings_calendar error: %s", e)
+            return []
+
+    async def get_economic_indicator(self, code: str) -> List[Dict[str, Any]]:
+        """Economic indicator time-series by FRED code (not per-symbol)."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.economic_data(code)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub economic_indicator error for %s: %s", code, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("data") or []
+        except Exception as e:
+            logger.error("Finnhub economic_indicator error for %s: %s", code, e)
+            return []
+
+    async def get_us_spending(
+        self, symbol: str, from_date: str, to_date: str,
+    ) -> List[Dict[str, Any]]:
+        """US government spending data for a symbol."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.stock_usa_spending(symbol, from_date, to_date)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub us_spending error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("data") or []
+        except Exception as e:
+            logger.error("Finnhub us_spending error for %s: %s", symbol, e)
+            return []
+
+    async def get_lobbying(
+        self, symbol: str, from_date: str, to_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Lobbying activity data for a symbol."""
+        if not self.is_available():
+            return []
+
+        client, key = self._get_client()
+        if not client:
+            return []
+
+        try:
+            def fetch():
+                try:
+                    return client.stock_lobbying(symbol, from_date, to_date)
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        mark_key_rate_limited("finnhub", key)
+                    else:
+                        logger.warning("Finnhub lobbying error for %s: %s", symbol, e)
+                    return None
+
+            data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+            if not data:
+                return []
+            return data.get("data") or []
+        except Exception as e:
+            logger.error("Finnhub lobbying error for %s: %s", symbol, e)
+            return []

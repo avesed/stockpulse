@@ -45,6 +45,7 @@ _rr_lock = threading.Lock()
 # Per-minute rate limits by provider
 _RATE_LIMITS: dict[str, int] = {
     "finnhub": 58,  # Finnhub free tier: 60/min, use 58 as safety margin
+    "yfinance": 120,  # Soft limit to prevent IP bans (~2 req/s)
 }
 
 # key -> (count, window_start_timestamp)
