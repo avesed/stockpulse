@@ -311,15 +311,24 @@ def _calc_rate(name: str) -> tuple[float, int, int]:
         return rate, capacity, key_count * 3
 
     if name in _FIXED_RPM:
-        rate = _FIXED_RPM[name] / 60.0
-        # Read concurrency from provider config (same UI field as process pool)
+        base_rpm = _FIXED_RPM[name]
         try:
             from app.core.api_keys import get_provider_config
             cfg = get_provider_config(name)
             concurrent = max(1, int(cfg.get("concurrency", 1)))
+            has_proxy = bool(str(cfg.get("proxy", "")).strip())
         except (ValueError, TypeError):
             concurrent = 4
-        return rate, 10, concurrent
+            has_proxy = False
+        # With proxy + IPv6 rotation, each request uses a different IP —
+        # remove the rate bottleneck and let the semaphore control concurrency.
+        if has_proxy and concurrent > 1:
+            rate = concurrent * 5.0  # headroom so bucket never starves workers
+            capacity = concurrent * 2
+        else:
+            rate = base_rpm / 60.0
+            capacity = 10
+        return rate, capacity, concurrent
 
     return 1.0, 5, 1
 

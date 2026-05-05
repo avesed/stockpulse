@@ -235,10 +235,25 @@ async def _run_job(
             return {"symbol_count": 0, "errors": ["No symbols"]}
 
         total = len(symbols)
-        logger.info("[%s/%s] started: %d symbols", job_type, market, total)
 
         batch_size = _YF_BATCH if use_yf else _AK_BATCH
         delay = _YF_DELAY if use_yf else _AK_DELAY
+
+        # Scale up when proxy is configured (same logic as ml_collection)
+        if use_yf:
+            from app.core.api_keys import get_provider_config
+            _cfg = get_provider_config("yfinance")
+            _proxy = str(_cfg.get("proxy", "")).strip()
+            try:
+                _concurrency = max(1, int(_cfg.get("concurrency", 1)))
+            except (ValueError, TypeError):
+                _concurrency = 1
+            if _proxy and _concurrency > 1:
+                batch_size = max(batch_size, _concurrency)
+                delay = 0.5
+
+        logger.info("[%s/%s] started: %d symbols (batch=%d, delay=%.1fs)",
+                    job_type, market, total, batch_size, delay)
         log_interval = max(total // 10, 100)
 
         pool = get_db_pool()
