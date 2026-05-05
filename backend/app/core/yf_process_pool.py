@@ -62,6 +62,11 @@ def _yf_worker_init(proxy: Optional[str]) -> None:
     import pandas
     _yf = yfinance
     _pd = pandas
+    # Disable cookie file cache so each request gets a fresh session
+    try:
+        yfinance.cache.get_cookie_cache().store('curlCffi', {})
+    except Exception:
+        pass
 
 
 def _nan_safe(v: Any) -> Any:
@@ -125,9 +130,20 @@ def _yf_dispatch(method: str, kw: dict) -> Any:
 
 
 def _clear_cache(ticker) -> None:
-    """Clear yfinance internal LRU cache to control memory."""
+    """Clear yfinance internal caches: LRU data cache + cookie/crumb session state.
+
+    Clearing cookie forces the next Ticker to re-authenticate with Yahoo,
+    getting a fresh session cookie. This prevents Yahoo from throttling
+    a single session that has made too many requests.
+    """
     try:
         ticker._data.cache_get.cache_clear()
+    except Exception:
+        pass
+    try:
+        ticker._data._cookie = None
+        ticker._data._crumb = None
+        ticker._data._session.cookies.clear()
     except Exception:
         pass
 
@@ -477,10 +493,10 @@ def start_pool(
             processes=workers,
             initializer=_yf_worker_init,
             initargs=(proxy,),
-            maxtasksperchild=maxtasksperchild,
+            maxtasksperchild=maxtasksperchild or None,
         )
         logger.info(
-            "yfinance process pool started: workers=%d, maxtasksperchild=%d, proxy=%s",
+            "yfinance process pool started: workers=%d, maxtasksperchild=%s, proxy=%s",
             workers, maxtasksperchild, proxy or "none",
         )
 
