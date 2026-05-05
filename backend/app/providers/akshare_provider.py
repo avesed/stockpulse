@@ -1543,29 +1543,24 @@ class AKShareProvider(DataProvider):
 
             # Fallback to yfinance
             if result is None:
-                import yfinance as yf
+                from app.core.yf_process_pool import yf_call
 
                 def _fetch_yf():
-                    ticker = yf.Ticker(f"{code}.HK")
-                    df = ticker.history(period=f"{days}d")
-
-                    if df is None or df.empty:
+                    bars = yf_call("ticker_history", {
+                        "symbol": f"{code}.HK", "period": f"{days}d",
+                    })
+                    if not bars:
                         return None
-
-                    bars = []
-                    for idx, row in df.iterrows():
-                        bars.append({
-                            "date": idx.strftime("%Y-%m-%d"),
-                            "open": round(float(row["Open"]), 2),
-                            "high": round(float(row["High"]), 2),
-                            "low": round(float(row["Low"]), 2),
-                            "close": round(float(row["Close"]), 2),
-                            "volume": int(row["Volume"]),
-                        })
-
                     return {
                         "symbol": symbol,
-                        "bars": bars,
+                        "bars": [{
+                            "date": b["date"][:10],
+                            "open": round(float(b["open"]), 2) if b.get("open") is not None else 0.0,
+                            "high": round(float(b["high"]), 2) if b.get("high") is not None else 0.0,
+                            "low": round(float(b["low"]), 2) if b.get("low") is not None else 0.0,
+                            "close": round(float(b["close"]), 2) if b.get("close") is not None else 0.0,
+                            "volume": int(b["volume"]) if b.get("volume") is not None else 0,
+                        } for b in bars],
                         "source": "yfinance",
                     }
 

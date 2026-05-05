@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     EXECUTOR_BACKGROUND_WORKERS: int = 10  # Daily bar + stock list collection
     EXECUTOR_PROFILE_WORKERS: int = 5    # Stock profile collection
 
+    # yfinance process pool (subprocess isolation for memory leak mitigation)
+    YF_POOL_WORKERS: int = 4
+    YF_POOL_MAX_TASKS_PER_CHILD: int = 50
+
     # WebSocket
     WS_HEARTBEAT_INTERVAL: int = 30          # seconds between server pings
     WS_HEARTBEAT_TIMEOUT: int = 10           # seconds to wait for pong

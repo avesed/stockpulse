@@ -70,6 +70,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.core.executor import start_watchdog, stop_watchdog, shutdown_executor
     start_watchdog()
 
+    # Start yfinance process pool (subprocess isolation for memory leak mitigation)
+    from app.core.yf_process_pool import start_pool as start_yf_pool, stop_pool as stop_yf_pool
+    from app.core.api_keys import get_provider_config
+    _yf_cfg = get_provider_config("yfinance")
+    _yf_proxy = str(_yf_cfg.get("proxy", "")).strip() or None
+    try:
+        _yf_ui = int(_yf_cfg.get("concurrency", 0))
+        _yf_workers = max(1, _yf_ui) if _yf_ui > 0 else settings.YF_POOL_WORKERS
+    except (ValueError, TypeError):
+        _yf_workers = settings.YF_POOL_WORKERS
+    start_yf_pool(
+        workers=_yf_workers,
+        maxtasksperchild=settings.YF_POOL_MAX_TASKS_PER_CHILD,
+        proxy=_yf_proxy,
+    )
+
     # Clean up stale collection_runs left by previous crashes
     from app.services.collection_run_service import mark_stale_runs_failed
     await mark_stale_runs_failed()
@@ -95,6 +111,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await stop_queues()
     await stop_watchdog()
     await stop_subscriber()
+    stop_yf_pool()
     shutdown_executor()
     await close_db_pool()
     await close_redis()

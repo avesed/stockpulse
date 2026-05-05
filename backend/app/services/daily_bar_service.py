@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from collections import defaultdict
 from datetime import date
 from typing import Any, Optional
@@ -27,10 +26,6 @@ _CN_FETCH_TIMEOUT = 60.0  # seconds per symbol
 
 # yfinance batch download timeout (50 symbols can be slow on first fetch)
 _YF_BATCH_TIMEOUT = 120.0  # seconds per batch
-
-# yfinance.shared._DFS is a global dict that is not thread-safe for concurrent
-# downloads.  Serialize all yf.download() calls with this lock.
-_yf_download_lock = threading.Lock()
 
 
 class DailyBarFetcher:
@@ -280,84 +275,64 @@ class DailyBarFetcher:
         Returns:
             Tuple of (results, errors).
         """
-        import pandas as pd
-
-        def _do_download() -> Any:
-            import yfinance as yf
-
-            with _yf_download_lock:
-                return yf.download(
-                    symbols,
-                    start=start_str,
-                    auto_adjust=True,
-                    progress=False,
-                )
+        from app.core.yf_process_pool import yf_call
 
         logger.info(
             "yfinance download: %d symbols, start=%s",
             len(symbols), start_str,
         )
 
-        df = await run_in_executor(_do_download, timeout=_YF_BATCH_TIMEOUT)
+        def _do_download():
+            return yf_call("batch_download", {
+                "tickers": symbols, "start": start_str, "auto_adjust": True,
+            })
 
-        if df is None or df.empty:
+        dl_data = await run_in_executor(_do_download, timeout=_YF_BATCH_TIMEOUT)
+
+        if not dl_data:
             logger.warning(
                 "Empty yfinance response: %d symbols, start=%s",
                 len(symbols), start_str,
             )
             return {}, {sym: "Empty response from yfinance" for sym in symbols}
 
-        is_multi = isinstance(df.columns, pd.MultiIndex)
         results: dict[str, dict] = {}
         errors: dict[str, str] = {}
 
         for sym in symbols:
             try:
-                if is_multi:
-                    sym_df = df[
-                        [("Open", sym), ("High", sym), ("Low", sym),
-                         ("Close", sym), ("Volume", sym)]
-                    ].copy()
-                    sym_df.columns = ["open", "high", "low", "close", "volume"]
-                else:
-                    # Single-symbol download produces flat columns
-                    sym_df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-                    sym_df.columns = ["open", "high", "low", "close", "volume"]
+                sym_bars = dl_data.get(sym)
+                if not sym_bars:
+                    errors[sym] = "Symbol not found in yfinance response"
+                    continue
 
-                # Drop rows with missing or zero close price
-                sym_df = sym_df.dropna(subset=["close"])
-                sym_df = sym_df[sym_df["close"] > 0]
-
-                # Dedup: only keep bars on or after the symbol's start_date (inclusive)
+                # Dedup: only keep bars on or after the symbol's start_date
                 original_start = start_dates_map.get(sym)
-                if original_start is not None:
-                    try:
-                        cutoff = date.fromisoformat(original_start)
-                        sym_df = sym_df[sym_df.index.date >= cutoff]
-                    except (ValueError, AttributeError):
-                        pass
+                filtered = []
+                for bar in sym_bars:
+                    close_val = bar.get("close")
+                    if close_val is None or close_val <= 0:
+                        continue
+                    bar_date_str = bar.get("date", "")[:10]
+                    if original_start:
+                        try:
+                            if date.fromisoformat(bar_date_str) < date.fromisoformat(original_start):
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+                    filtered.append({
+                        "date": bar_date_str,
+                        "open": float(bar["open"]) if bar.get("open") is not None else 0.0,
+                        "high": float(bar["high"]) if bar.get("high") is not None else 0.0,
+                        "low": float(bar["low"]) if bar.get("low") is not None else 0.0,
+                        "close": float(close_val),
+                        "volume": int(bar["volume"]) if bar.get("volume") is not None else 0,
+                    })
 
-                bars = [
-                    {
-                        "date": str(idx.date()),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": int(row["volume"]),
-                    }
-                    for idx, row in sym_df.iterrows()
-                ]
+                results[sym] = {"bars": filtered, "source": "yfinance"}
+                if filtered:
+                    logger.info("Fetched %d bars for %s", len(filtered), sym)
 
-                results[sym] = {"bars": bars, "source": "yfinance"}
-
-                if bars:
-                    logger.info("Fetched %d bars for %s", len(bars), sym)
-
-            except KeyError:
-                # Symbol not present in batch response (delisted / invalid)
-                logger.debug("Symbol %s absent from yfinance batch response", sym)
-                errors[sym] = "Symbol not found in yfinance response"
             except Exception as exc:
                 logger.warning("Failed to extract bars for %s: %s", sym, exc)
                 errors[sym] = str(exc)

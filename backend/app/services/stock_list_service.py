@@ -121,19 +121,6 @@ def _fetch_yfinance_us_fallback() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.warning("yfinance fallback: Wikipedia S&P 500 fetch failed: %s", e)
 
-    # Source 2: NASDAQ-100 and Dow 30 via yfinance for broader coverage
-    try:
-        import yfinance as yf
-
-        for index_sym, exchange in [("^NDX", "XNAS"), ("^DJI", "XNYS")]:
-            try:
-                ticker = yf.Ticker(index_sym)
-                # yfinance doesn't expose constituents directly, skip
-            except Exception:
-                pass
-    except Exception:
-        pass
-
     if not symbols_found:
         logger.warning("yfinance fallback: no US symbols fetched, returning empty")
         return []

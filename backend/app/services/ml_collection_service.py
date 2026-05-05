@@ -26,10 +26,8 @@ Jobs:
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import logging
-import multiprocessing as mp
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -99,104 +97,6 @@ _VAL_FIELD_MAP = {
     "ev": "ev",
 }
 
-
-# ---------------------------------------------------------------------------
-# Multiprocessing worker for yfinance (each process has its own singleton)
-# ---------------------------------------------------------------------------
-
-def _yf_worker_init(proxy: str | None):
-    """Initializer for multiprocessing pool — import yfinance once per worker."""
-    global _yf_mod
-    if proxy:
-        os.environ["HTTPS_PROXY"] = proxy
-        os.environ["HTTP_PROXY"] = proxy
-    import yfinance
-    _yf_mod = yfinance
-
-
-def _yf_fetch_valuation(symbol: str) -> tuple[str, list[dict] | None, str | None]:
-    """Run in subprocess: fetch valuation measures, return serializable data."""
-    import pandas as pd
-    try:
-        ticker = _yf_mod.Ticker(symbol)
-        df = ticker.get_valuation_measures()
-        # Clear LRU cache to prevent memory accumulation from cached HTML responses
-        ticker._data.cache_get.cache_clear()
-        if df is None or df.empty:
-            return (symbol, None, None)
-
-        metric_map = {
-            "Market Cap": "market_cap", "Enterprise Value": "enterprise_value",
-            "Trailing P/E": "trailing_pe", "Forward P/E": "forward_pe",
-            "PEG Ratio (5yr expected)": "peg_ratio", "Price/Sales": "price_to_sales",
-            "Price/Book": "price_to_book", "Enterprise Value/Revenue": "ev_to_revenue",
-            "Enterprise Value/EBITDA": "ev_to_ebitda",
-        }
-
-        def _parse_val(v):
-            if v is None or (isinstance(v, float) and pd.isna(v)):
-                return None
-            s = str(v).strip()
-            if not s or s == "—":
-                return None
-            mult = 1.0
-            if s[-1] in "TBMK":
-                mult = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}[s[-1]]
-                s = s[:-1]
-            try:
-                return float(s) * mult
-            except ValueError:
-                return None
-
-        results = []
-        for col in df.columns:
-            col_str = str(col)
-            if col_str.lower() == "current":
-                continue
-            entry: dict[str, Any] = {"date": col_str}
-            for idx_label, key in metric_map.items():
-                val = df.loc[idx_label, col] if idx_label in df.index else None
-                entry[key] = _parse_val(val)
-            results.append(entry)
-        return (symbol, results or None, None)
-    except Exception as e:
-        return (symbol, None, str(e))
-
-
-_yf_process_pool: mp.pool.Pool | None = None
-_yf_pool_size: int = 0
-
-
-def _get_yf_pool(concurrency: int, proxy: str | None) -> mp.pool.Pool:
-    """Get or create a reusable multiprocessing pool for yfinance."""
-    global _yf_process_pool, _yf_pool_size
-    if _yf_process_pool is None or _yf_pool_size != concurrency:
-        if _yf_process_pool is not None:
-            _yf_process_pool.terminate()
-        _yf_process_pool = mp.Pool(
-            processes=concurrency,
-            initializer=_yf_worker_init,
-            initargs=(proxy,),
-        )
-        _yf_pool_size = concurrency
-        logging.getLogger(__name__).info(
-            "Created yfinance process pool: %d workers", concurrency,
-        )
-    return _yf_process_pool
-
-
-def _shutdown_yf_pool():
-    """Terminate the yfinance process pool and free memory."""
-    global _yf_process_pool, _yf_pool_size
-    if _yf_process_pool is not None:
-        try:
-            _yf_process_pool.terminate()
-            _yf_process_pool.join()
-        except Exception:
-            pass
-        _yf_process_pool = None
-        _yf_pool_size = 0
-        logging.getLogger(__name__).info("yfinance process pool shut down")
 
 
 # ---------------------------------------------------------------------------
@@ -292,41 +192,16 @@ async def _run_job(
             from app.providers.akshare_provider import AKShareProvider
             provider = AKShareProvider()
 
-        use_mp = (
-            provider_name == "yfinance"
-            and prov_concurrency > 1
-            and prov_proxy
-            and job_type == "valuation_history"
-        )
-        mp_pool = _get_yf_pool(prov_concurrency, prov_proxy) if use_mp else None
-
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i: i + batch_size]
 
-            if mp_pool is not None:
-                loop = asyncio.get_event_loop()
-                mp_results = await loop.run_in_executor(
-                    None, lambda b=batch: list(mp_pool.map(_yf_fetch_valuation, b)),
-                )
-                for sym, measures_data, err_msg in mp_results:
-                    if err_msg:
-                        errors.append({"symbol": sym, "error": err_msg, "category": "fetch"})
-                    elif measures_data:
-                        try:
-                            records = _parse_yf_valuation_measures(measures_data, market)
-                            count = await _upsert_valuation(pool, sym, market, records)
-                            upserted += count
-                        except Exception as exc:
-                            errors.append({"symbol": sym, "error": str(exc), "category": "upsert"})
-                    done += 1
-            else:
-                for sym in batch:
-                    try:
-                        count = await per_symbol_fn(pool, sym, provider, today)
-                        upserted += count
-                    except Exception as exc:
-                        errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
-                    done += 1
+            for sym in batch:
+                try:
+                    count = await per_symbol_fn(pool, sym, provider, today)
+                    upserted += count
+                except Exception as exc:
+                    errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
+                done += 1
 
             await _update_progress(
                 progress_key, done, total, started_at, len(errors),
@@ -377,7 +252,6 @@ async def _run_job(
                 pass
         return {"symbol_count": 0, "errors": [{"symbol": "", "error": str(exc), "category": "fatal"}]}
     finally:
-        _shutdown_yf_pool()
         if run_id and not run_finalized:
             try:
                 await collection_run_service.fail_run(run_id, "interrupted")
@@ -1241,61 +1115,47 @@ async def collect_macro_daily(
     try:
         from app.core.provider_queue import Priority, submit
         from app.core.executor import ExecutorPool
+        from app.core.yf_process_pool import yf_call
 
         tickers = list(MACRO_TICKERS.keys())
+        end = datetime.now(timezone.utc).date()
+        start = end - timedelta(days=7)
 
-        def _download_macro():
-            import yfinance as yf
-            end = datetime.now(timezone.utc).date()
-            start = end - timedelta(days=7)  # extra padding for market holidays
-            df = yf.download(tickers, start=start.isoformat(), end=end.isoformat(), progress=False)
-            return df
-
-        df = await submit("yfinance", _download_macro, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
+        dl_data = await submit(
+            "yfinance", yf_call, "batch_download",
+            {"tickers": tickers, "start": start.isoformat(), "end": end.isoformat()},
+            priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+        )
 
         pool = get_db_pool()
         upserted = 0
         errors: list[dict] = []
 
-        if df is not None and not df.empty:
-            import pandas as pd
+        if dl_data:
             for ticker, indicator_name in MACRO_TICKERS.items():
                 try:
-                    rows = []
-                    # Handle multi-level columns from yf.download
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if "Close" not in df.columns.get_level_values(0):
-                            continue
-                        close_series = df["Close"][ticker] if ticker in df["Close"].columns else None
-                        open_series = df["Open"][ticker] if "Open" in df.columns.get_level_values(0) and ticker in df["Open"].columns else None
-                        high_series = df["High"][ticker] if "High" in df.columns.get_level_values(0) and ticker in df["High"].columns else None
-                        low_series = df["Low"][ticker] if "Low" in df.columns.get_level_values(0) and ticker in df["Low"].columns else None
-                        vol_series = df["Volume"][ticker] if "Volume" in df.columns.get_level_values(0) and ticker in df["Volume"].columns else None
-                    else:
-                        # Single ticker fallback
-                        close_series = df.get("Close")
-                        open_series = df.get("Open")
-                        high_series = df.get("High")
-                        low_series = df.get("Low")
-                        vol_series = df.get("Volume")
-
-                    if close_series is None:
+                    bars = dl_data.get(ticker)
+                    if not bars:
                         continue
 
-                    for idx in close_series.index:
-                        close_val = close_series[idx]
-                        if pd.isna(close_val):
+                    rows = []
+                    for bar in bars:
+                        close_val = bar.get("close")
+                        if close_val is None:
                             continue
-                        bar_date = idx.date() if hasattr(idx, 'date') else idx
-                        row = {
+                        bar_date_str = bar.get("date", "")[:10]
+                        try:
+                            bar_date = date.fromisoformat(bar_date_str)
+                        except (ValueError, TypeError):
+                            continue
+                        rows.append({
                             "date": bar_date,
                             "close": float(close_val),
-                            "open": float(open_series[idx]) if open_series is not None and not pd.isna(open_series[idx]) else None,
-                            "high": float(high_series[idx]) if high_series is not None and not pd.isna(high_series[idx]) else None,
-                            "low": float(low_series[idx]) if low_series is not None and not pd.isna(low_series[idx]) else None,
-                            "volume": int(vol_series[idx]) if vol_series is not None and not pd.isna(vol_series[idx]) else None,
-                        }
-                        rows.append(row)
+                            "open": float(bar["open"]) if bar.get("open") is not None else None,
+                            "high": float(bar["high"]) if bar.get("high") is not None else None,
+                            "low": float(bar["low"]) if bar.get("low") is not None else None,
+                            "volume": int(bar["volume"]) if bar.get("volume") is not None else None,
+                        })
 
                     count = await _upsert_macro_daily(pool, ticker, indicator_name, rows)
                     upserted += count

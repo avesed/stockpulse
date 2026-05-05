@@ -49,16 +49,13 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _fetch_yahoo_profile_sync(symbol: str) -> Optional[Dict[str, Any]]:
     """Single-request Yahoo quoteSummary fetch (assetProfile + quoteType only)."""
-    import yfinance as yf
+    from app.core.yf_process_pool import yf_call
 
-    ticker = yf.Ticker(symbol)
-    yd = ticker._data
     url = _QUOTE_SUMMARY_URL.format(symbol=symbol)
     params = {**_QUOTE_SUMMARY_PARAMS, "symbol": symbol}
-    resp = yd.get(url=url, params=params)
-    if resp is None:
+    data = yf_call("ticker_data_get", {"symbol": symbol, "url": url, "params": params})
+    if data is None:
         return None
-    data = resp.json()
     results = data.get("quoteSummary", {}).get("result")
     if not results:
         return None
@@ -589,12 +586,6 @@ async def fetch_us_profiles_batch(
     Returns:
         List of profile dicts.
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.warning("[StockProfile] yfinance not installed")
-        return []
-
     symbols = symbols[:50]
     logger.info("[StockProfile] Fetching US profiles batch: %d symbols", len(symbols))
     t0 = time.monotonic()
@@ -608,11 +599,8 @@ async def fetch_us_profiles_batch(
         async with sem:
             for attempt in range(2):
                 try:
-                    def _get_info(s: str = symbol) -> Optional[Dict[str, Any]]:
-                        ticker = yf.Ticker(s)
-                        return ticker.info
-
-                    info = await run_in_executor(_get_info, timeout=30.0)
+                    from app.core.yf_process_pool import yf_call_async
+                    info = await yf_call_async("ticker_info", {"symbol": symbol}, timeout=30.0)
                     if info and isinstance(info, dict):
                         name = info.get("shortName") or info.get("longName", "")
                         if name:
@@ -667,12 +655,6 @@ async def fetch_hk_profiles_batch(
     Returns:
         List of profile dicts (with canonical 5-digit symbols).
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.warning("[StockProfile] yfinance not installed")
-        return []
-
     symbols = symbols[:50]
     logger.info("[StockProfile] Fetching HK profiles batch: %d symbols", len(symbols))
     t0 = time.monotonic()
@@ -696,11 +678,8 @@ async def fetch_hk_profiles_batch(
         async with sem:
             for attempt in range(2):
                 try:
-                    def _get_info(s: str = yf_symbol) -> Optional[Dict[str, Any]]:
-                        ticker = yf.Ticker(s)
-                        return ticker.info
-
-                    info = await run_in_executor(_get_info, timeout=30.0)
+                    from app.core.yf_process_pool import yf_call_async
+                    info = await yf_call_async("ticker_info", {"symbol": yf_symbol}, timeout=30.0)
                     if info and isinstance(info, dict):
                         name = info.get("shortName") or info.get("longName", "")
                         if name:

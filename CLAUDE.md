@@ -1,65 +1,96 @@
-# CLAUDE.md — StockPulse Project Guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Overview
 
 StockPulse is a standalone universal stock data platform providing market data collection, caching, and API access. Extracted from WebStock's data-service module, it serves as a reusable data backend for any consumer.
 
 **Stack**: FastAPI (Python 3.11) + React 18 (TypeScript) + PostgreSQL 16 (pgvector) + Redis 7
-**Port**: 8010 (backend), 80 (production nginx)
+**Ports**: 8010 (backend), 80 (production nginx), 5433 (postgres dev), 6380 (redis dev)
 
 ---
 
-## Project Structure
+## Common Commands
 
+```bash
+# Development — full-stack from source (postgres + redis + app)
+docker compose up -d --build
+
+# Production — pre-built image
+docker compose -f docker-compose.prod.yml up -d
+
+# Database migrations (run inside container or with backend/ as cwd)
+cd backend && alembic upgrade head
+
+# Frontend dev (standalone, outside Docker)
+cd frontend && npm install && npm run dev        # Vite on :5173
+cd frontend && npm run build                     # production build
+cd frontend && npm run type-check                # tsc --noEmit
+cd frontend && npm run lint                      # eslint
+
+# Rebuild just the app container (preserves postgres/redis volumes)
+docker compose up -d --build app
 ```
-stockpulse/
-├── backend/
-│   ├── pyproject.toml
-│   ├── alembic.ini
-│   ├── alembic/versions/          # 001_initial_schema
-│   └── app/
-│       ├── main.py                # FastAPI app with lifespan
-│       ├── config.py              # Pydantic Settings
-│       ├── core/
-│       │   ├── auth.py            # JWT (admin) + X-API-Key (consumers) dual auth
-│       │   ├── database.py        # asyncpg pool (bulk ops)
-│       │   ├── orm.py             # SQLAlchemy async (ORM CRUD)
-│       │   ├── redis.py           # Redis cache wrapper
-│       │   ├── secrets.py         # JWT secret bootstrap (env → DB)
-│       │   ├── executor.py        # 3-pool ThreadPoolExecutor + watchdog
-│       │   ├── scheduler.py       # APScheduler + Redis leader election + 7 cron jobs
-│       │   ├── api_keys.py        # Provider key management (DB + env fallback + pub/sub)
-│       │   ├── request_id.py      # Request ID middleware
-│       │   └── request_logger.py  # API usage stats to Redis
-│       ├── models/                # SQLAlchemy ORM (user, api_consumer, system_setting, provider_config)
-│       ├── schemas/               # Pydantic (base/CamelModel, ApiResponse, auth, stock, market, analysis, news, content, reference)
-│       ├── providers/             # Data source adapters (yfinance, akshare, tiingo, tushare, polygon)
-│       ├── services/              # 17 business logic services
-│       ├── api/
-│       │   ├── health.py          # GET /health (no auth)
-│       │   ├── auth.py            # /api/v1/auth/* (register, login, refresh, logout, me)
-│       │   ├── public/            # /api/v1/data/* (X-API-Key auth — stock, market, analysis, news, content, reference, internal)
-│       │   └── admin/             # /api/v1/admin/* (JWT auth — consumers, users, providers, settings, collection, scheduler, stats)
-│       └── utils/
-├── frontend/src/                  # React admin dashboard (WebStock-style UI)
-│   ├── components/ui/             # 20 Radix UI components (from WebStock)
-│   ├── components/layout/         # AdminLayout (collapsible sidebar)
-│   ├── pages/                     # 7 pages: Dashboard, Collection, Consumers, Providers, Stats, Settings, Login
-│   ├── api/                       # Axios client with JWT interceptor
-│   ├── stores/                    # Zustand (auth, theme, toast)
-│   └── i18n/                      # en/zh translations
-│       └── ws/                    # WebSocket real-time streaming
-│           ├── protocol.py        # Message types + orjson serialization
-│           ├── auth.py            # WS auth (JWT query param / API Key)
-│           ├── manager.py         # ConnectionManager singleton
-│           ├── redis_fanout.py    # Redis pub/sub multi-worker broadcast
-│           ├── endpoints.py       # /api/v1/ws/admin, /api/v1/ws/data
-│           └── upstream/          # Upstream WS collectors (yfinance, finnhub, polygon)
-├── docker/                        # nginx.conf, supervisord.conf, entrypoint.sh
-├── docker-compose.yml             # Dev: full-stack build from source
-├── docker-compose.prod.yml        # Production: ghcr.io/avesed/stockpulse:latest
-└── Dockerfile                     # Multi-stage: frontend-builder → production (supervisord)
-```
+
+No test suite exists yet. Validate changes by building the Docker image and testing via the admin UI or API.
+
+---
+
+## Architecture
+
+### Dual Database Layer
+
+The backend uses **two database access patterns** side by side:
+- **asyncpg pool** (`core/database.py`) — raw SQL for bulk operations (collection upserts, batch queries). Used in all collection services via `get_db_pool()`.
+- **SQLAlchemy async** (`core/orm.py`) — ORM for CRUD on `users`, `api_consumers`, `system_settings`, `provider_configs`. Used in auth and admin endpoints.
+
+Both connect to the same PostgreSQL instance. The split exists because bulk collection upserts (thousands of `ON CONFLICT` inserts) are significantly faster with raw asyncpg.
+
+### Concurrency Model: Sync Providers in Async App
+
+Most data providers (yfinance, akshare, tushare, finnhub SDK) are synchronous blocking libraries. The app bridges them to async FastAPI via:
+
+1. **Three ThreadPoolExecutor pools** (`core/executor.py`) — FRONTEND (user API, 20 threads), BACKGROUND (collection, 10 threads), PROFILE (knowledge base, 5 threads). Isolated to prevent collection from starving user requests. Self-healing watchdog probes health every 2 min, recycles pools every 4 hours.
+
+2. **ProviderQueue** (`core/provider_queue.py`) — rate-limited priority queue per provider. Token-bucket enforces rate limits (yfinance: 600/min, Finnhub: 58/min per key). Priority levels: REALTIME(0) > FRONTEND(1) > SCHEDULED(5) > BACKFILL(10). All yfinance/Finnhub calls go through `submit()`.
+
+3. **Multiprocessing pool** (`ml_collection_service.py`) — separate `mp.Pool` for yfinance `valuation_history` collection (CN/HK). Subprocess isolation for memory leak mitigation. Currently only covers one job type; expansion planned.
+
+**yfinance memory leak**: yfinance leaks memory via internal LRU caches and `requests.Session` objects. The multiprocessing pool mitigates this through process-level isolation (`maxtasksperchild` for automatic worker recycling). Worker functions must call `ticker._data.cache_get.cache_clear()` after each fetch.
+
+### Provider Routing
+
+`StockRouter` (`services/stock_router.py`) routes requests by market with fallback chains:
+- **US/Metal**: yfinance primary → Tiingo fallback
+- **HK**: AKShare primary → yfinance fallback
+- **A-shares (SH/SZ)**: AKShare primary → Tushare fallback → yfinance fallback
+
+Each provider extends `DataProvider` base class (`providers/base.py`). Provider API keys are managed in `provider_configs` table with env fallback, hot-reloaded via Redis pub/sub (`core/api_keys.py`).
+
+### Collection Pipeline
+
+Two collection services handle scheduled data gathering:
+
+- **`fundamentals_collection_service.py`** — 5 jobs: financials (weekly), analyst_ratings (daily), northbound (daily CN), institutional_holders (quarterly), fund_holdings (quarterly CN). Uses `_run_job()` generic runner with Redis lock, progress tracking, and WebSocket progress broadcast.
+
+- **`ml_collection_service.py`** — 14 jobs: valuation, insider, earnings, sentiment, macro, alternatives. Same `_run_job()` pattern. Mixed providers (Finnhub for US fundamentals, yfinance for scraping, AKShare for CN alternative data).
+
+Both follow the same pattern: Redis distributed lock → resolve symbols → batch loop with per-symbol fetch → asyncpg upsert → progress to Redis + WebSocket → audit record in `collection_runs`.
+
+### WebSocket Architecture
+
+Two-tier WebSocket system:
+
+- **Upstream collectors** (`ws/upstream/`) — persistent connections to Yahoo WS, Finnhub WS, Polygon WS. Parse raw feeds (protobuf for Yahoo, JSON for others) into normalized events.
+- **Downstream fan-out** (`ws/redis_fanout.py` + `ws/manager.py`) — Redis pub/sub broadcasts events across Uvicorn workers. `ConnectionManager` dispatches to subscribed client sessions.
+- **Two endpoints**: `/api/v1/ws/admin` (JWT, collection progress + quotes) and `/api/v1/ws/data` (API key, quote subscriptions).
+
+The yfinance WS collector (`ws/upstream/yfinance_collector.py`) connects directly to `wss://streamer.finance.yahoo.com` and only uses `yfinance.pricing_pb2` for protobuf decoding — no `yf.Ticker()` calls, no memory leak concern.
+
+### Scheduler
+
+APScheduler with Redis-based leader election ensures only one worker runs cron jobs in multi-process deployments. Jobs defined in `core/scheduler.py`. Leader acquires `sp:scheduler:leader` with TTL; non-leaders skip execution.
 
 ---
 
@@ -72,9 +103,7 @@ stockpulse/
 
 ### Machine Consumers (X-API-Key)
 - SHA-256 hash stored in `api_consumers` table
-- Raw key shown only at creation time
 - Per-consumer rate limiting + allowed_endpoints filtering
-- `last_used_at` updated on each request
 
 ---
 
@@ -84,60 +113,19 @@ stockpulse/
 |------|--------|------|---------|
 | Health | `/health` | None | Docker health check |
 | Auth | `/api/v1/auth/*` | None/JWT | Register, login, refresh, logout |
-| Public | `/api/v1/data/*` | X-API-Key | Stock quotes, history, news, content, analysis |
+| Public | `/api/v1/data/*` | X-API-Key | Stock quotes, history, news, analysis |
 | Internal | `/api/v1/data/internal/*` | X-API-Key | Symbols list, history batch (machine-to-machine) |
-| Admin | `/api/v1/admin/*` | JWT Bearer | Consumers, providers, collection, settings, scheduler, stats |
-| WS Admin | `/api/v1/ws/admin` | JWT (query param) | Real-time collection progress, quotes, collector control |
+| Admin | `/api/v1/admin/*` | JWT Bearer | Consumers, providers, collection, scheduler, stats |
+| WS Admin | `/api/v1/ws/admin` | JWT (query param) | Real-time collection progress, quotes |
 | WS Data | `/api/v1/ws/data` | X-API-Key (query param) | Real-time quote subscriptions |
-
----
-
-## Database Schema
-
-**PostgreSQL 16** with 7 tables:
-- `users` — admin accounts (int PK)
-- `api_consumers` — machine consumers (UUID PK, SHA-256 hashed API key)
-- `system_settings` — key-value store (JWT secret, etc.)
-- `provider_configs` — data source health and API keys
-- `stock_daily_bars` — OHLCV data (bigserial PK, unique symbol+date)
-- `stock_symbols` — stock list ~37K symbols (symbol PK)
-
----
-
-## Scheduler (APScheduler + Redis Leader Election)
-
-| Job | Schedule (UTC) | Purpose |
-|-----|---------------|---------|
-| collect_cn | 08:00 | A-share daily bars |
-| collect_hk | 09:00 | HK daily bars |
-| collect_us | 22:00 | US daily bars |
-| collect_metal | 22:30 | Precious metals bars |
-| update_stock_list | 05:30 | Build ~37K symbol list |
-| build_stock_kb | Sun 06:00 | Stock profile collection |
-| sync_concept_boards | Mon-Sat 06:00 | A-share concept mapping |
-
----
-
-## Common Commands
-
-```bash
-# Development (full-stack, build from source)
-docker compose up -d --build              # postgres + redis + app on :8010
-
-# Production (pre-built image)
-docker compose -f docker-compose.prod.yml up -d   # ghcr.io/avesed/stockpulse:latest
-
-# Database
-cd backend && alembic upgrade head
-```
 
 ---
 
 ## Redis
 
-- **DB**: 0 (own instance)
-- **Key prefix**: `sp:` (scheduler, cache, stats, rate limit)
-- **Policy**: noeviction (critical for JWT denylist)
+- **DB**: 0 (own instance, port 6380 in dev)
+- **Key prefix**: `sp:` — scheduler leader, cache, stats, rate limit, collection locks/progress, JWT denylist
+- **Policy**: noeviction (critical for JWT denylist and distributed locks)
 
 ---
 
@@ -146,7 +134,13 @@ cd backend && alembic upgrade head
 See `.env.example` for full list.
 
 **Required**: `DATABASE_URL`, `REDIS_URL`
-**Optional**: `JWT_SECRET_KEY` (auto-generated), `FIRST_ADMIN_EMAIL`, `FINNHUB_API_KEY`, `CORS_ORIGINS`
+**Optional**: `JWT_SECRET_KEY` (auto-generated), `FIRST_ADMIN_EMAIL`, `FINNHUB_API_KEY`, `FINNHUB_API_KEYS` (comma-separated multi-key), `CORS_ORIGINS`
+
+---
+
+## Frontend
+
+React 18 admin dashboard using Vite, Tailwind CSS, Radix UI components, TanStack React Query, Zustand stores, and i18next (en/zh). Axios client with JWT interceptor auto-refreshes tokens. Built frontend is served by nginx in the Docker image.
 
 ---
 
