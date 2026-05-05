@@ -27,6 +27,9 @@ from app.schemas.stock import (
     NorthboundHoldingsData,
     NorthboundHoldingEntry,
     OHLCVBar,
+    OptionContract,
+    OptionsChainData,
+    OptionsExpiry,
     PeersData,
     PeerStock,
     QuoteData,
@@ -87,6 +90,28 @@ async def get_quote(
         market=data.get("market", market),
         currency=data.get("currency"),
         source=source,
+        bid=data.get("bid"),
+        bid_size=data.get("bid_size"),
+        ask=data.get("ask"),
+        ask_size=data.get("ask_size"),
+        market_state=data.get("market_state"),
+        pre_market_price=data.get("pre_market_price"),
+        pre_market_change=data.get("pre_market_change"),
+        pre_market_change_percent=data.get("pre_market_change_percent"),
+        post_market_price=data.get("post_market_price"),
+        post_market_change=data.get("post_market_change"),
+        post_market_change_percent=data.get("post_market_change_percent"),
+        regular_market_time=data.get("regular_market_time"),
+        average_volume=data.get("average_volume"),
+        average_volume_10day=data.get("average_volume_10day"),
+        fifty_two_week_high=data.get("fifty_two_week_high"),
+        fifty_two_week_low=data.get("fifty_two_week_low"),
+        fifty_day_average=data.get("fifty_day_average"),
+        two_hundred_day_average=data.get("two_hundred_day_average"),
+        shares_outstanding=data.get("shares_outstanding"),
+        float_shares=data.get("float_shares"),
+        shares_short=data.get("shares_short"),
+        short_percent_of_float=data.get("short_percent_of_float"),
     )
 
     return ApiResponse(
@@ -707,5 +732,51 @@ async def batch_daily_bars(body: BatchDailyBarsRequest):
     return ApiResponse(
         data=response_data,
         source="mixed",
+        elapsed_ms=elapsed,
+    )
+
+
+@router.get(
+    "/options/{symbol}",
+    response_model=ApiResponse[OptionsChainData],
+)
+async def get_options_chain(
+    symbol: str,
+    expiry: Optional[str] = Query(None, description="Expiry date YYYY-MM-DD; defaults to nearest"),
+):
+    """Get options chain for a US stock symbol."""
+    from app.providers.yfinance_provider import YFinanceProvider
+
+    t0 = time.monotonic()
+    provider = YFinanceProvider()
+    data = await provider.get_options_chain(symbol, expiry=expiry)
+    elapsed = int((time.monotonic() - t0) * 1000)
+
+    if data is None:
+        return ApiResponse(
+            success=False,
+            error=f"No options data for {symbol}",
+            elapsed_ms=elapsed,
+        )
+
+    chain = None
+    if data.get("chain"):
+        c = data["chain"]
+        chain = OptionsExpiry(
+            expiry=c["expiry"],
+            calls=[OptionContract(**contract) for contract in c.get("calls", [])],
+            puts=[OptionContract(**contract) for contract in c.get("puts", [])],
+        )
+
+    options_data = OptionsChainData(
+        symbol=data.get("symbol", symbol),
+        expiries=data.get("expiries", []),
+        chain=chain,
+        source="yfinance",
+    )
+
+    return ApiResponse(
+        data=options_data,
+        source="yfinance",
         elapsed_ms=elapsed,
     )

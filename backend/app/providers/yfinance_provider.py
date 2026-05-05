@@ -118,6 +118,11 @@ class YFinanceProvider(DataProvider):
             change = price - prev_close if prev_close else 0
             change_pct = (change / prev_close * 100) if prev_close else 0
 
+            rmt = info.get("regularMarketTime")
+            regular_market_time = (
+                datetime.utcfromtimestamp(rmt).isoformat() if rmt else None
+            )
+
             return {
                 "symbol": symbol,
                 "name": info.get("shortName") or info.get("longName"),
@@ -134,6 +139,29 @@ class YFinanceProvider(DataProvider):
                 "market": market,
                 "currency": info.get("currency"),
                 "source": "yfinance",
+                # Extended quote fields
+                "bid": info.get("bid"),
+                "bid_size": info.get("bidSize"),
+                "ask": info.get("ask"),
+                "ask_size": info.get("askSize"),
+                "market_state": info.get("marketState"),
+                "pre_market_price": info.get("preMarketPrice"),
+                "pre_market_change": info.get("preMarketChange"),
+                "pre_market_change_percent": info.get("preMarketChangePercent"),
+                "post_market_price": info.get("postMarketPrice"),
+                "post_market_change": info.get("postMarketChange"),
+                "post_market_change_percent": info.get("postMarketChangePercent"),
+                "regular_market_time": regular_market_time,
+                "average_volume": info.get("averageVolume"),
+                "average_volume_10day": info.get("averageDailyVolume10Day"),
+                "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+                "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+                "fifty_day_average": info.get("fiftyDayAverage"),
+                "two_hundred_day_average": info.get("twoHundredDayAverage"),
+                "shares_outstanding": info.get("sharesOutstanding"),
+                "float_shares": info.get("floatShares"),
+                "shares_short": info.get("sharesShort"),
+                "short_percent_of_float": info.get("shortPercentOfFloat"),
             }
         except Exception as e:
             logger.error("YFinance quote error for %s: %s", symbol, e)
@@ -759,6 +787,20 @@ class YFinanceProvider(DataProvider):
             )
         except Exception as e:
             logger.warning("YFinance options_sentiment error for %s: %s", symbol, e)
+            return None
+
+    async def get_options_chain(
+        self, symbol: str, expiry: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Get full options chain for a symbol (US only)."""
+        try:
+            return await submit(
+                "yfinance", yf_call, "ticker_options_detail",
+                {"symbol": symbol, "expiry": expiry},
+                priority=Priority.FRONTEND, pool=ExecutorPool.FRONTEND,
+            )
+        except Exception as e:
+            logger.error("YFinance options_chain error for %s: %s", symbol, e)
             return None
 
     async def get_upgrades_downgrades(

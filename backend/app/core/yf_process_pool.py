@@ -62,9 +62,11 @@ def _yf_worker_init(proxy: Optional[str]) -> None:
     import pandas
     _yf = yfinance
     _pd = pandas
-    # Disable cookie file cache so each request gets a fresh session
+    # Invalidate cookie cache so each Ticker gets a fresh cookie from Yahoo.
+    # Must store None (not {}) — storing {} causes _load_cookie_curlCffi to
+    # find a non-None entry with empty 'cookie' dict, then crash on keys()[0].
     try:
-        yfinance.cache.get_cookie_cache().store('curlCffi', {})
+        yfinance.cache.get_cookie_cache().store('curlCffi', None)
     except Exception:
         pass
 
@@ -112,6 +114,8 @@ def _yf_dispatch(method: str, kw: dict) -> Any:
             return _do_ticker_insider_purchases(kw)
         elif method == "ticker_options_chain":
             return _do_ticker_options_chain(kw)
+        elif method == "ticker_options_detail":
+            return _do_ticker_options_detail(kw)
         elif method == "ticker_upgrades":
             return _do_ticker_upgrades(kw)
         elif method == "ticker_valuation":
@@ -144,7 +148,10 @@ def _clear_cache(ticker) -> None:
         ticker._data._cookie = None
         ticker._data._crumb = None
         ticker._data._session.cookies.clear()
-        _yf.cache.get_cookie_cache().store('curlCffi', {})
+        # Store None (not {}) — storing {} leaves a non-None cache entry
+        # with empty 'cookie' dict, causing _load_cookie_curlCffi to crash
+        # on list(cookies.keys())[0] when cookies is empty.
+        _yf.cache.get_cookie_cache().store('curlCffi', None)
     except Exception:
         pass
 
@@ -262,6 +269,58 @@ def _do_ticker_options_chain(kw: dict) -> Optional[dict]:
         "call_oi": call_oi,
         "put_call_oi_ratio": pc_oi_ratio,
         "expiry": nearest,
+    }
+
+
+def _do_ticker_options_detail(kw: dict) -> Optional[dict]:
+    """Full options chain for a specific expiry (or nearest if not specified)."""
+    symbol = kw["symbol"]
+    expiry = kw.get("expiry")
+
+    ticker = _yf.Ticker(symbol)
+    expiries = ticker.options
+    if not expiries:
+        _clear_cache(ticker)
+        return None
+
+    target_expiry = expiry if expiry and expiry in expiries else expiries[0]
+    chain = ticker.option_chain(target_expiry)
+    _clear_cache(ticker)
+
+    def _contracts(df) -> list[dict]:
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            ltd = row.get("lastTradeDate")
+            if hasattr(ltd, "isoformat"):
+                ltd = ltd.isoformat()
+            elif ltd is not None:
+                ltd = str(ltd)
+            records.append({
+                "contract_symbol": str(row.get("contractSymbol", "")),
+                "strike": _nan_safe(row.get("strike")),
+                "last_price": _nan_safe(row.get("lastPrice")),
+                "bid": _nan_safe(row.get("bid")),
+                "ask": _nan_safe(row.get("ask")),
+                "change": _nan_safe(row.get("change")),
+                "percent_change": _nan_safe(row.get("percentChange")),
+                "volume": int(row["volume"]) if _pd.notna(row.get("volume")) else None,
+                "open_interest": int(row["openInterest"]) if _pd.notna(row.get("openInterest")) else None,
+                "implied_volatility": _nan_safe(row.get("impliedVolatility")),
+                "in_the_money": bool(row["inTheMoney"]) if row.get("inTheMoney") is not None else None,
+                "last_trade_date": ltd,
+            })
+        return records
+
+    return {
+        "symbol": symbol,
+        "expiries": list(expiries),
+        "chain": {
+            "expiry": target_expiry,
+            "calls": _contracts(chain.calls),
+            "puts": _contracts(chain.puts),
+        },
     }
 
 

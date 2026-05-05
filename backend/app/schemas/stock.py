@@ -25,6 +25,44 @@ class QuoteData(BaseModel):
     currency: Optional[str] = None
     source: Optional[str] = None
 
+    # Bid/Ask
+    bid: Optional[float] = None
+    bid_size: Optional[int] = None
+    ask: Optional[float] = None
+    ask_size: Optional[int] = None
+
+    # Market state
+    market_state: Optional[str] = None  # PRE / REGULAR / POST / CLOSED
+
+    # Extended hours
+    pre_market_price: Optional[float] = None
+    pre_market_change: Optional[float] = None
+    pre_market_change_percent: Optional[float] = None
+    post_market_price: Optional[float] = None
+    post_market_change: Optional[float] = None
+    post_market_change_percent: Optional[float] = None
+
+    # Timing
+    regular_market_time: Optional[str] = None
+
+    # Volume averages
+    average_volume: Optional[int] = None
+    average_volume_10day: Optional[int] = None
+
+    # 52-week range
+    fifty_two_week_high: Optional[float] = None
+    fifty_two_week_low: Optional[float] = None
+
+    # Moving averages
+    fifty_day_average: Optional[float] = None
+    two_hundred_day_average: Optional[float] = None
+
+    # Shares data
+    shares_outstanding: Optional[int] = None
+    float_shares: Optional[int] = None
+    shares_short: Optional[int] = None
+    short_percent_of_float: Optional[float] = None
+
 
 class OHLCVBar(BaseModel):
     """Single OHLCV candlestick bar."""
@@ -218,3 +256,40 @@ class BatchDailyBarsData(BaseModel):
 
     results: dict[str, SymbolBarsResult]  # symbol -> bars
     errors: dict[str, str]  # symbol -> error message
+
+
+# --- Options chain models ---
+
+
+class OptionContract(BaseModel):
+    """Single option contract in the chain."""
+
+    contract_symbol: str
+    strike: float
+    last_price: Optional[float] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    change: Optional[float] = None
+    percent_change: Optional[float] = None
+    volume: Optional[int] = None
+    open_interest: Optional[int] = None
+    implied_volatility: Optional[float] = None
+    in_the_money: Optional[bool] = None
+    last_trade_date: Optional[str] = None
+
+
+class OptionsExpiry(BaseModel):
+    """Options chain for a single expiry date."""
+
+    expiry: str
+    calls: list[OptionContract] = []
+    puts: list[OptionContract] = []
+
+
+class OptionsChainData(BaseModel):
+    """Full options chain response for a symbol."""
+
+    symbol: str
+    expiries: list[str] = []
+    chain: Optional[OptionsExpiry] = None
+    source: Optional[str] = None
