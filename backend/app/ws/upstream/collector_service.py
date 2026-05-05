@@ -25,10 +25,10 @@ def _ensure_registry() -> None:
         return
     from app.ws.upstream.finnhub_orchestrator import FinnhubOrchestrator
     from app.ws.upstream.massive_collector import MassiveCollector
-    from app.ws.upstream.yfinance_collector import YFinanceCollector
+    from app.ws.upstream.yfinance_orchestrator import YFinanceOrchestrator
     _COLLECTOR_CLASSES["finnhub"] = FinnhubOrchestrator
     _COLLECTOR_CLASSES["massive"] = MassiveCollector
-    _COLLECTOR_CLASSES["yfinance"] = YFinanceCollector
+    _COLLECTOR_CLASSES["yfinance"] = YFinanceOrchestrator
 
 
 async def start_collector(provider: str, symbols: list[str] | None = None) -> dict[str, Any]:
