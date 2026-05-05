@@ -32,7 +32,7 @@ from enum import IntEnum
 from functools import partial
 from typing import Any, Callable, Optional, TypeVar
 
-from app.core.executor import ExecutorPool, run_in_executor
+from app.core.executor import ExecutorPool
 
 logger = logging.getLogger(__name__)
 
@@ -260,11 +260,11 @@ class ProviderQueue:
     async def _execute_item(self, item: _QueueItem) -> None:
         """Execute a single queued item and resolve its future."""
         try:
-            result = await run_in_executor(
-                item.func, *item.args,
+            loop = asyncio.get_running_loop()
+            call = partial(item.func, *item.args, **item.kwargs) if item.kwargs else partial(item.func, *item.args)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, call),
                 timeout=item.timeout,
-                pool=item.pool,
-                **item.kwargs,
             )
             if not item.future.done():
                 item.future.set_result(result)

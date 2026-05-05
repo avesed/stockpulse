@@ -51,10 +51,10 @@ def _yf_worker_init(proxy: Optional[str]) -> None:
         from curl_cffi.requests import Session
         _orig_request = Session.request
 
-        def _proxied_request(self, method, url, **kwargs):
+        def _proxied_request(self, *args, **kwargs):
             if "proxy" not in kwargs:
                 kwargs["proxy"] = proxy
-            return _orig_request(self, method, url, **kwargs)
+            return _orig_request(self, *args, **kwargs)
 
         Session.request = _proxied_request
 
