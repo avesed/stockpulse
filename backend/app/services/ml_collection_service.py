@@ -1125,6 +1125,7 @@ async def collect_macro_daily(
             "yfinance", yf_call, "batch_download",
             {"tickers": tickers, "start": start.isoformat(), "end": end.isoformat()},
             priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            timeout=90.0,
         )
 
         pool = get_db_pool()

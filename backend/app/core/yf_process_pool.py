@@ -521,7 +521,7 @@ def _get_pool() -> mp.pool.Pool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def yf_call(method: str, kwargs_dict: dict) -> Any:
+def yf_call(method: str, kwargs_dict: dict, timeout: float = 55.0) -> Any:
     """Synchronous: submit work to the process pool, block until result.
 
     Designed to be called from a ThreadPool thread (via provider_queue).
@@ -530,7 +530,7 @@ def yf_call(method: str, kwargs_dict: dict) -> Any:
     pool = _get_pool()
     async_result = pool.apply_async(_yf_dispatch, (method, kwargs_dict))
     try:
-        return async_result.get(timeout=55)
+        return async_result.get(timeout=timeout)
     except mp.TimeoutError:
         raise TimeoutError(f"yfinance subprocess timed out: {method} {kwargs_dict.get('symbol', '')}")
 

@@ -285,7 +285,7 @@ class DailyBarFetcher:
         def _do_download():
             return yf_call("batch_download", {
                 "tickers": symbols, "start": start_str, "auto_adjust": True,
-            })
+            }, timeout=_YF_BATCH_TIMEOUT - 5)
 
         dl_data = await run_in_executor(_do_download, timeout=_YF_BATCH_TIMEOUT)
 
