@@ -200,10 +200,10 @@ async def _run_job(
                 return_exceptions=True,
             )
             for j, result in enumerate(results):
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     errors.append({"symbol": batch[j], "error": str(result), "category": "fetch"})
                 else:
-                    upserted += result
+                    upserted += (result or 0)
                 done += 1
 
             await _update_progress(

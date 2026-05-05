@@ -652,6 +652,8 @@ async def get_ml_progress(job_type: str, market: str) -> dict[str, Any]:
             "message": f"{raw.get('upserted', 0)} upserted",
             "elapsedSeconds": raw.get("elapsedSeconds"),
             "errorsCount": raw.get("errorsCount", 0),
+            "estimatedRemaining": raw.get("estimatedRemaining"),
+            "startedAt": raw.get("startedAt"),
         }
 
     return {"jobType": job_type, "market": market, "progress": progress, "taskRunning": task_running}
