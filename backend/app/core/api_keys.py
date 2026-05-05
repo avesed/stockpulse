@@ -35,6 +35,9 @@ _api_keys: dict[str, str] = {}
 # Multi-key pools: provider_name -> list of all keys (primary + extras)
 _api_key_pools: dict[str, list[str]] = {}
 
+# Provider config_json cache: provider_name -> dict
+_provider_configs: dict[str, dict] = {}
+
 # Round-robin cursor per provider (thread-safe via _rr_lock)
 _api_key_index: dict[str, int] = {}
 _rr_lock = threading.Lock()
@@ -118,6 +121,11 @@ def get_api_keys(name: str) -> list[str]:
             return [val]
 
     return []
+
+
+def get_provider_config(name: str) -> dict:
+    """Return cached config_json for a provider (empty dict if none)."""
+    return dict(_provider_configs.get(name, {}))
 
 
 def get_next_api_key(name: str) -> Optional[str]:
@@ -261,11 +269,14 @@ async def load_api_keys_from_db() -> None:
                 except (json.JSONDecodeError, TypeError):
                     config = None
             if isinstance(config, dict):
+                _provider_configs[name] = config
                 extras = config.get("extra_api_keys")
                 if isinstance(extras, list):
                     for k in extras:
                         if isinstance(k, str) and k.strip() and k.strip() not in key_pool:
                             key_pool.append(k.strip())
+            else:
+                _provider_configs.pop(name, None)
             if len(key_pool) > 1:
                 _api_key_pools[name] = key_pool
                 logger.info("API key pool for %s: %d keys", name, len(key_pool))

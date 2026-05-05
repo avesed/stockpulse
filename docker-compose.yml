@@ -33,6 +33,7 @@ services:
     build: .
     ports:
       - "8010:80"
+    mem_limit: 4g
     environment:
       DATABASE_URL: postgresql+asyncpg://stockpulse:stockpulse@postgres:5432/stockpulse
       REDIS_URL: redis://redis:6379/0

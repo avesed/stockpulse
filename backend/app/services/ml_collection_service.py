@@ -26,12 +26,16 @@ Jobs:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
+import multiprocessing as mp
+import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
+from app.core.api_keys import get_provider_config
 from app.core.database import get_db_pool
 from app.core.provider_queue import has_high_priority_pending
 from app.core.redis import get_redis
@@ -97,6 +101,105 @@ _VAL_FIELD_MAP = {
 
 
 # ---------------------------------------------------------------------------
+# Multiprocessing worker for yfinance (each process has its own singleton)
+# ---------------------------------------------------------------------------
+
+def _yf_worker_init(proxy: str | None):
+    """Initializer for multiprocessing pool — import yfinance once per worker."""
+    global _yf_mod
+    if proxy:
+        os.environ["HTTPS_PROXY"] = proxy
+        os.environ["HTTP_PROXY"] = proxy
+    import yfinance
+    _yf_mod = yfinance
+
+
+def _yf_fetch_valuation(symbol: str) -> tuple[str, list[dict] | None, str | None]:
+    """Run in subprocess: fetch valuation measures, return serializable data."""
+    import pandas as pd
+    try:
+        ticker = _yf_mod.Ticker(symbol)
+        df = ticker.get_valuation_measures()
+        # Clear LRU cache to prevent memory accumulation from cached HTML responses
+        ticker._data.cache_get.cache_clear()
+        if df is None or df.empty:
+            return (symbol, None, None)
+
+        metric_map = {
+            "Market Cap": "market_cap", "Enterprise Value": "enterprise_value",
+            "Trailing P/E": "trailing_pe", "Forward P/E": "forward_pe",
+            "PEG Ratio (5yr expected)": "peg_ratio", "Price/Sales": "price_to_sales",
+            "Price/Book": "price_to_book", "Enterprise Value/Revenue": "ev_to_revenue",
+            "Enterprise Value/EBITDA": "ev_to_ebitda",
+        }
+
+        def _parse_val(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            s = str(v).strip()
+            if not s or s == "—":
+                return None
+            mult = 1.0
+            if s[-1] in "TBMK":
+                mult = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}[s[-1]]
+                s = s[:-1]
+            try:
+                return float(s) * mult
+            except ValueError:
+                return None
+
+        results = []
+        for col in df.columns:
+            col_str = str(col)
+            if col_str.lower() == "current":
+                continue
+            entry: dict[str, Any] = {"date": col_str}
+            for idx_label, key in metric_map.items():
+                val = df.loc[idx_label, col] if idx_label in df.index else None
+                entry[key] = _parse_val(val)
+            results.append(entry)
+        return (symbol, results or None, None)
+    except Exception as e:
+        return (symbol, None, str(e))
+
+
+_yf_process_pool: mp.pool.Pool | None = None
+_yf_pool_size: int = 0
+
+
+def _get_yf_pool(concurrency: int, proxy: str | None) -> mp.pool.Pool:
+    """Get or create a reusable multiprocessing pool for yfinance."""
+    global _yf_process_pool, _yf_pool_size
+    if _yf_process_pool is None or _yf_pool_size != concurrency:
+        if _yf_process_pool is not None:
+            _yf_process_pool.terminate()
+        _yf_process_pool = mp.Pool(
+            processes=concurrency,
+            initializer=_yf_worker_init,
+            initargs=(proxy,),
+        )
+        _yf_pool_size = concurrency
+        logging.getLogger(__name__).info(
+            "Created yfinance process pool: %d workers", concurrency,
+        )
+    return _yf_process_pool
+
+
+def _shutdown_yf_pool():
+    """Terminate the yfinance process pool and free memory."""
+    global _yf_process_pool, _yf_pool_size
+    if _yf_process_pool is not None:
+        try:
+            _yf_process_pool.terminate()
+            _yf_process_pool.join()
+        except Exception:
+            pass
+        _yf_process_pool = None
+        _yf_pool_size = 0
+        logging.getLogger(__name__).info("yfinance process pool shut down")
+
+
+# ---------------------------------------------------------------------------
 # Generic job runner
 # ---------------------------------------------------------------------------
 
@@ -132,6 +235,34 @@ async def _run_job(
     except Exception:
         logger.warning("Failed to create ml_%s run record for %s", job_type, market)
 
+    # Read provider-specific config (proxy, concurrency)
+    prov_config = get_provider_config(provider_name)
+    prov_proxy = str(prov_config.get("proxy", "")).strip() or None
+    try:
+        prov_concurrency = max(1, int(prov_config.get("concurrency", 1)))
+    except (ValueError, TypeError):
+        prov_concurrency = 1
+
+    if prov_proxy:
+        os.environ["HTTPS_PROXY"] = prov_proxy
+        os.environ["HTTP_PROXY"] = prov_proxy
+        logger.info("[ml_%s/%s] proxy set: %s", job_type, market, prov_proxy)
+
+    # When proxy is configured with concurrency > 1, override conservative defaults
+    if prov_proxy and prov_concurrency > 1:
+        if batch_size is not None and batch_size < prov_concurrency:
+            logger.info(
+                "[ml_%s/%s] batch_size %d -> %d (proxy concurrency)",
+                job_type, market, batch_size, prov_concurrency,
+            )
+            batch_size = prov_concurrency
+        if delay is not None and delay > 1.0:
+            logger.info(
+                "[ml_%s/%s] delay %.1fs -> 0.5s (proxy enabled)",
+                job_type, market, delay,
+            )
+            delay = 0.5
+
     try:
         symbols = await symbol_resolver.get_symbols(market)
         if not symbols:
@@ -140,7 +271,8 @@ async def _run_job(
             return {"symbol_count": 0, "errors": ["No symbols"]}
 
         total = len(symbols)
-        logger.info("[ml_%s/%s] started: %d symbols", job_type, market, total)
+        logger.info("[ml_%s/%s] started: %d symbols (batch=%d, delay=%.1fs)",
+                     job_type, market, total, batch_size, delay)
 
         log_interval = max(total // 10, 100)
         pool = get_db_pool()
@@ -160,15 +292,41 @@ async def _run_job(
             from app.providers.akshare_provider import AKShareProvider
             provider = AKShareProvider()
 
+        use_mp = (
+            provider_name == "yfinance"
+            and prov_concurrency > 1
+            and prov_proxy
+            and job_type == "valuation_history"
+        )
+        mp_pool = _get_yf_pool(prov_concurrency, prov_proxy) if use_mp else None
+
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i: i + batch_size]
-            for sym in batch:
-                try:
-                    count = await per_symbol_fn(pool, sym, provider, today)
-                    upserted += count
-                except Exception as exc:
-                    errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
-                done += 1
+
+            if mp_pool is not None:
+                loop = asyncio.get_event_loop()
+                mp_results = await loop.run_in_executor(
+                    None, lambda b=batch: list(mp_pool.map(_yf_fetch_valuation, b)),
+                )
+                for sym, measures_data, err_msg in mp_results:
+                    if err_msg:
+                        errors.append({"symbol": sym, "error": err_msg, "category": "fetch"})
+                    elif measures_data:
+                        try:
+                            records = _parse_yf_valuation_measures(measures_data, market)
+                            count = await _upsert_valuation(pool, sym, market, records)
+                            upserted += count
+                        except Exception as exc:
+                            errors.append({"symbol": sym, "error": str(exc), "category": "upsert"})
+                    done += 1
+            else:
+                for sym in batch:
+                    try:
+                        count = await per_symbol_fn(pool, sym, provider, today)
+                        upserted += count
+                    except Exception as exc:
+                        errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
+                    done += 1
 
             await _update_progress(
                 progress_key, done, total, started_at, len(errors),
@@ -219,6 +377,7 @@ async def _run_job(
                 pass
         return {"symbol_count": 0, "errors": [{"symbol": "", "error": str(exc), "category": "fatal"}]}
     finally:
+        _shutdown_yf_pool()
         if run_id and not run_finalized:
             try:
                 await collection_run_service.fail_run(run_id, "interrupted")

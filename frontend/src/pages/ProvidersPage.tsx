@@ -36,6 +36,9 @@ function HealthIcon({ status }: { status: string }) {
 // Providers that support multi-key configuration
 const MULTI_KEY_PROVIDERS = new Set(['finnhub'])
 
+// Providers that support proxy + concurrency configuration
+const PROXY_PROVIDERS = new Set(['yfinance'])
+
 export default function ProvidersPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -45,6 +48,9 @@ export default function ProvidersPage() {
   const [editKeys, setEditKeys] = useState<string[]>([''])
   // For single-key providers
   const [editApiKey, setEditApiKey] = useState('')
+  // For proxy providers (yfinance)
+  const [editProxy, setEditProxy] = useState('')
+  const [editConcurrency, setEditConcurrency] = useState('1')
   const [testResults, setTestResults] = useState<Record<number, { success: boolean; message: string }>>({})
   const [testingIds, setTestingIds] = useState<Set<number>>(new Set())
 
@@ -108,12 +114,18 @@ export default function ProvidersPage() {
       setEditApiKey('')
       setEditKeys([''])
     }
+    // Proxy/concurrency fields
+    const cfg = provider.configJson as Record<string, unknown> | null
+    setEditProxy((cfg?.proxy as string) ?? '')
+    setEditConcurrency(String(cfg?.concurrency ?? '1'))
   }
 
   const closeDialog = () => {
     setEditingProvider(null)
     setEditApiKey('')
     setEditKeys([''])
+    setEditProxy('')
+    setEditConcurrency('1')
   }
 
   // Multi-key list operations
@@ -134,6 +146,7 @@ export default function ProvidersPage() {
     if (!editingProvider) return
 
     const isMultiKey = MULTI_KEY_PROVIDERS.has(editingProvider.providerName)
+    const isProxyProvider = PROXY_PROVIDERS.has(editingProvider.providerName)
 
     if (isMultiKey) {
       const payload: { apiKey?: string; configJson?: Record<string, unknown> } = {}
@@ -154,6 +167,26 @@ export default function ProvidersPage() {
         const { extra_api_keys: _, ...rest } = existingConfig
         payload.configJson = Object.keys(rest).length > 0 ? rest : {}
       }
+
+      if (!payload.apiKey && !payload.configJson) return
+      updateMutation.mutate({ id: editingProvider.id, data: payload })
+    } else if (isProxyProvider) {
+      const payload: { apiKey?: string; configJson?: Record<string, unknown> } = {}
+
+      if (editApiKey) {
+        payload.apiKey = editApiKey
+      }
+
+      const existingConfig = (editingProvider.configJson as Record<string, unknown>) || {}
+      const proxyVal = editProxy.trim()
+      const concurrencyVal = Math.max(1, parseInt(editConcurrency, 10) || 1)
+      payload.configJson = {
+        ...existingConfig,
+        proxy: proxyVal || undefined,
+        concurrency: concurrencyVal,
+      }
+      // Clean up undefined keys
+      if (!proxyVal) delete payload.configJson.proxy
 
       if (!payload.apiKey && !payload.configJson) return
       updateMutation.mutate({ id: editingProvider.id, data: payload })
@@ -178,6 +211,7 @@ export default function ProvidersPage() {
 
   // Compute hasChanges for save button
   const isMultiKey = editingProvider ? MULTI_KEY_PROVIDERS.has(editingProvider.providerName) : false
+  const isProxyProvider = editingProvider ? PROXY_PROVIDERS.has(editingProvider.providerName) : false
   const hasChanges = isMultiKey
     ? (() => {
         // Primary key changed?
@@ -188,7 +222,15 @@ export default function ProvidersPage() {
         if (oldExtras.length !== newExtras.length) return true
         return oldExtras.some((k, i) => k !== newExtras[i])
       })()
-    : !!editApiKey
+    : isProxyProvider
+      ? (() => {
+          if (editApiKey) return true
+          const cfg = editingProvider?.configJson as Record<string, unknown> | null
+          if (editProxy.trim() !== ((cfg?.proxy as string) ?? '')) return true
+          if (String(parseInt(editConcurrency, 10) || 1) !== String(cfg?.concurrency ?? 1)) return true
+          return false
+        })()
+      : !!editApiKey
 
   return (
     <div className="space-y-6">
@@ -235,6 +277,15 @@ export default function ProvidersPage() {
                     {provider.isEnabled ? t('common.enabled') : t('common.disabled')}
                   </Badge>
                 </div>
+
+                {PROXY_PROVIDERS.has(provider.providerName) && !!(provider.configJson as Record<string, unknown>)?.proxy && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">{t('providers.proxyUrl')}</span>
+                    <span className="text-xs font-mono truncate max-w-[140px]">
+                      {String((provider.configJson as Record<string, unknown>).proxy)}
+                    </span>
+                  </div>
+                )}
 
                 {/* Test result inline */}
                 {testResults[provider.id] != null && (
@@ -305,7 +356,7 @@ export default function ProvidersPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {isMultiKey ? t('providers.editApiKeys') : t('providers.editApiKey')}
+              {isProxyProvider ? t('providers.editProvider') : isMultiKey ? t('providers.editApiKeys') : t('providers.editApiKey')}
               {editingProvider && (
                 <span className="ml-2 text-sm font-normal text-muted-foreground">
                   — {editingProvider.displayName}
@@ -354,6 +405,43 @@ export default function ProvidersPage() {
               <p className="text-xs text-muted-foreground">
                 {t('providers.extraKeysHint')}
               </p>
+            </div>
+          ) : isProxyProvider ? (
+            /* Proxy provider (yfinance): API key + proxy + concurrency */
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label>API Key</Label>
+                <Input
+                  type="password"
+                  value={editApiKey}
+                  onChange={(e) => setEditApiKey(e.target.value)}
+                  placeholder={editingProvider?.hasApiKey ? '••••••••' : t('providers.apiKeyOptional')}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('providers.proxyUrl')}</Label>
+                <Input
+                  value={editProxy}
+                  onChange={(e) => setEditProxy(e.target.value)}
+                  placeholder="http://10.1.1.247:1080"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t('providers.proxyHint')}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('providers.concurrency')}</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={editConcurrency}
+                  onChange={(e) => setEditConcurrency(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t('providers.concurrencyHint')}
+                </p>
+              </div>
             </div>
           ) : (
             /* Single-key */
