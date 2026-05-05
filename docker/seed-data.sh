@@ -23,6 +23,9 @@ if [ -z "$DATABASE_URL" ]; then
   exit 0
 fi
 
+# psql doesn't understand +asyncpg dialect suffix — strip it
+DATABASE_URL="${DATABASE_URL/+asyncpg/}"
+
 # Detect existing data — skip if any of the main tables has rows
 EXISTING=$(psql "$DATABASE_URL" -t -A -c "SELECT (SELECT COUNT(*) FROM stock_daily_bars LIMIT 1) + (SELECT COUNT(*) FROM stock_symbols LIMIT 1);" 2>/dev/null || echo "0")
 EXISTING=$(echo "$EXISTING" | tr -d '[:space:]')
