@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # yfinance process pool (subprocess isolation for memory leak mitigation)
     YF_POOL_WORKERS: int = 4
-    YF_POOL_MAX_TASKS_PER_CHILD: int = 50
+    YF_POOL_MAX_TASKS_PER_CHILD: int = 500
 
     # WebSocket
     WS_HEARTBEAT_INTERVAL: int = 30          # seconds between server pings

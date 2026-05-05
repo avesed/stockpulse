@@ -54,6 +54,10 @@ def _yf_worker_init(proxy: Optional[str]) -> None:
         def _proxied_request(self, *args, **kwargs):
             if "proxy" not in kwargs:
                 kwargs["proxy"] = proxy
+            # Force connection close so next request gets a new proxy tunnel → new IPv6
+            hdrs = kwargs.get("headers") or {}
+            hdrs["Connection"] = "close"
+            kwargs["headers"] = hdrs
             return _orig_request(self, *args, **kwargs)
 
         Session.request = _proxied_request
