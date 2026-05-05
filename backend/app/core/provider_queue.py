@@ -115,17 +115,21 @@ class _QueueItem:
 class ProviderQueue:
     """Rate-limited priority queue for a single provider."""
 
-    def __init__(self, name: str, rate: float, capacity: int) -> None:
+    def __init__(self, name: str, rate: float, capacity: int,
+                 max_concurrent: int = 1) -> None:
         self.name = name
         self._bucket = _TokenBucket(rate, capacity)
         self._queue: asyncio.PriorityQueue[_QueueItem] = asyncio.PriorityQueue()
         self._processor_task: Optional[asyncio.Task] = None
         self._stopping = False
+        self._max_concurrent = max_concurrent
+        self._sem: Optional[asyncio.Semaphore] = None  # created lazily in async context
 
         # Stats
         self._total_processed = 0
         self._total_throttled = 0
         self._high_priority_pending = 0
+        self._in_flight = 0
 
     # -- public api --
 
@@ -180,6 +184,8 @@ class ProviderQueue:
             "provider": self.name,
             "queue_depth": self._queue.qsize(),
             "high_priority_pending": self._high_priority_pending,
+            "in_flight": self._in_flight,
+            "max_concurrent": self._max_concurrent,
             "total_processed": self._total_processed,
             "total_throttled": self._total_throttled,
         }
@@ -219,7 +225,15 @@ class ProviderQueue:
     # -- processor loop --
 
     async def _process_loop(self) -> None:
-        """Main processing loop: dequeue → acquire token → execute."""
+        """Main processing loop: dequeue → rate-limit → dispatch concurrently.
+
+        Items are dispatched as independent tasks up to ``max_concurrent``
+        in-flight at once.  The token bucket controls the *rate* of
+        dispatching; the semaphore controls the *concurrency*.
+        """
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self._max_concurrent)
+
         while not self._stopping:
             try:
                 item = await self._queue.get()
@@ -227,36 +241,46 @@ class ProviderQueue:
                 return
 
             if item.future.done():
-                # Caller timed out or cancelled
                 if item.priority <= Priority.FRONTEND:
                     self._high_priority_pending = max(0, self._high_priority_pending - 1)
                 continue
 
+            # Wait for a concurrency slot, then a rate-limit token
             try:
+                await self._sem.acquire()
                 await self._bucket.acquire()
-                self._total_throttled += 1
-
-                result = await run_in_executor(
-                    item.func, *item.args,
-                    timeout=item.timeout,
-                    pool=item.pool,
-                    **item.kwargs,
-                )
-
-                if not item.future.done():
-                    item.future.set_result(result)
-
             except asyncio.CancelledError:
-                if not item.future.done():
-                    item.future.cancel()
+                self._sem.release()
                 return
-            except Exception as exc:
-                if not item.future.done():
-                    item.future.set_exception(exc)
-            finally:
-                if item.priority <= Priority.FRONTEND:
-                    self._high_priority_pending = max(0, self._high_priority_pending - 1)
-                self._total_processed += 1
+
+            self._total_throttled += 1
+            self._in_flight += 1
+            asyncio.create_task(self._execute_item(item))
+
+    async def _execute_item(self, item: _QueueItem) -> None:
+        """Execute a single queued item and resolve its future."""
+        try:
+            result = await run_in_executor(
+                item.func, *item.args,
+                timeout=item.timeout,
+                pool=item.pool,
+                **item.kwargs,
+            )
+            if not item.future.done():
+                item.future.set_result(result)
+        except asyncio.CancelledError:
+            if not item.future.done():
+                item.future.cancel()
+        except Exception as exc:
+            if not item.future.done():
+                item.future.set_exception(exc)
+        finally:
+            if item.priority <= Priority.FRONTEND:
+                self._high_priority_pending = max(0, self._high_priority_pending - 1)
+            self._total_processed += 1
+            self._in_flight -= 1
+            if self._sem is not None:
+                self._sem.release()
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +299,8 @@ _FIXED_RPM: dict[str, int] = {
 }
 
 
-def _calc_rate(name: str) -> tuple[float, int]:
-    """Calculate (tokens_per_second, burst_capacity) for a provider."""
+def _calc_rate(name: str) -> tuple[float, int, int]:
+    """Calculate (tokens_per_second, burst_capacity, max_concurrent)."""
     from app.core.api_keys import get_key_pool_size
 
     if name in _PER_KEY_RPM:
@@ -284,26 +308,37 @@ def _calc_rate(name: str) -> tuple[float, int]:
         rpm = _PER_KEY_RPM[name] * key_count
         rate = rpm / 60.0
         capacity = key_count * 5
-        return rate, capacity
+        return rate, capacity, key_count * 3
 
     if name in _FIXED_RPM:
         rate = _FIXED_RPM[name] / 60.0
-        return rate, 10
+        # Read concurrency from provider config (same UI field as process pool)
+        try:
+            from app.core.api_keys import get_provider_config
+            cfg = get_provider_config(name)
+            concurrent = max(1, int(cfg.get("concurrency", 1)))
+        except (ValueError, TypeError):
+            concurrent = 4
+        return rate, 10, concurrent
 
-    return 1.0, 5
+    return 1.0, 5, 1
 
 
 def _get_or_create(name: str) -> ProviderQueue:
     if name not in _queues:
-        rate, capacity = _calc_rate(name)
-        _queues[name] = ProviderQueue(name, rate, capacity)
+        rate, capacity, concurrent = _calc_rate(name)
+        _queues[name] = ProviderQueue(name, rate, capacity, concurrent)
+        logger.info(
+            "Queue[%s] created: rate=%.1f/s, burst=%d, concurrent=%d",
+            name, rate, capacity, concurrent,
+        )
     return _queues[name]
 
 
 def _recalc_rates() -> None:
     """Recalculate all provider rates based on current key counts."""
     for name, q in _queues.items():
-        rate, capacity = _calc_rate(name)
+        rate, capacity, _ = _calc_rate(name)
         q.update_rate(rate, capacity)
 
 

@@ -195,12 +195,15 @@ async def _run_job(
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i: i + batch_size]
 
-            for sym in batch:
-                try:
-                    count = await per_symbol_fn(pool, sym, provider, today)
-                    upserted += count
-                except Exception as exc:
-                    errors.append({"symbol": sym, "error": str(exc), "category": "fetch"})
+            results = await asyncio.gather(
+                *[per_symbol_fn(pool, sym, provider, today) for sym in batch],
+                return_exceptions=True,
+            )
+            for j, result in enumerate(results):
+                if isinstance(result, Exception):
+                    errors.append({"symbol": batch[j], "error": str(result), "category": "fetch"})
+                else:
+                    upserted += result
                 done += 1
 
             await _update_progress(

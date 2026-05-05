@@ -86,9 +86,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         proxy=_yf_proxy,
     )
 
-    # Clean up stale collection_runs left by previous crashes
+    # Clean up stale collection_runs and Redis locks left by previous crashes
     from app.services.collection_run_service import mark_stale_runs_failed
     await mark_stale_runs_failed()
+    from app.core.redis import get_redis
+    _r = await get_redis()
+    _stale_locks = await _r.keys("sp:*:lock")
+    if _stale_locks:
+        await _r.delete(*_stale_locks)
+        logger.info("Cleared %d stale collection locks from previous run", len(_stale_locks))
 
     # Start scheduler (leader election ensures single-worker execution)
     from app.core.scheduler import start_scheduler, stop_scheduler
