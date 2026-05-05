@@ -144,6 +144,7 @@ def _clear_cache(ticker) -> None:
         ticker._data._cookie = None
         ticker._data._crumb = None
         ticker._data._session.cookies.clear()
+        _yf.cache.get_cookie_cache().store('curlCffi', {})
     except Exception:
         pass
 
