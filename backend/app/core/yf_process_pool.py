@@ -41,11 +41,23 @@ _pd = None  # pandas module
 
 
 def _yf_worker_init(proxy: Optional[str]) -> None:
-    """Called once per worker process at fork time."""
+    """Called once per worker process at fork time.
+
+    Patches curl_cffi.Session.request so every HTTP call in this process
+    goes through the proxy — no per-Ticker configuration needed.
+    """
     global _yf, _pd
     if proxy:
-        os.environ["HTTPS_PROXY"] = proxy
-        os.environ["HTTP_PROXY"] = proxy
+        from curl_cffi.requests import Session
+        _orig_request = Session.request
+
+        def _proxied_request(self, method, url, **kwargs):
+            if "proxy" not in kwargs:
+                kwargs["proxy"] = proxy
+            return _orig_request(self, method, url, **kwargs)
+
+        Session.request = _proxied_request
+
     import yfinance
     import pandas
     _yf = yfinance
@@ -109,6 +121,7 @@ def _yf_dispatch(method: str, kw: dict) -> Any:
             raise ValueError(f"Unknown yf dispatch method: {method}")
     except Exception:
         raise  # let mp.Pool propagate the exception to the caller
+
 
 
 def _clear_cache(ticker) -> None:
