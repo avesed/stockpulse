@@ -1,0 +1,19 @@
+[package]
+name = "ipv6-rotator"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight HTTP CONNECT proxy with IPv6 source address rotation"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+rand = "0.8"
+socket2 = { version = "0.5", features = ["all"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
