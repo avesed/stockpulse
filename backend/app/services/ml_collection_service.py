@@ -77,6 +77,7 @@ return 0
 
 # Finnhub valuation field name -> DB column name
 _VAL_FIELD_MAP = {
+    # annual keys
     "pe": "pe_ratio",
     "pb": "pb_ratio",
     "ps": "ps_ratio",
@@ -95,6 +96,17 @@ _VAL_FIELD_MAP = {
     "bookValue": "book_value",
     "eps": "eps",
     "ev": "ev",
+    "totalDebtToEquity": "debt_to_equity",
+    # quarterly TTM keys (Finnhub appends TTM suffix)
+    "peTTM": "pe_ratio",
+    "psTTM": "ps_ratio",
+    "evEbitdaTTM": "ev_to_ebitda",
+    "evRevenueTTM": "ev_to_revenue",
+    "roeTTM": "roe",
+    "roaTTM": "roa",
+    "roicTTM": "roic",
+    "payoutRatioTTM": "payout_ratio",
+    "fcfPerShareTTM": "fcf_per_share",
 }
 
 
@@ -281,31 +293,47 @@ async def _upsert_valuation(pool, symbol: str, market: str, records: list[dict])
                     INSERT INTO valuation_history
                         (symbol, market, date, period_type,
                          pe_ratio, pb_ratio, ps_ratio, ev_to_ebitda, ev_to_revenue,
-                         roe, roa, roic, fcf_margin, net_margin,
-                         operating_margin, gross_margin, current_ratio, quick_ratio,
-                         payout_ratio, book_value, eps, ev, data_source)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+                         roe, roa, roic, fcf_margin, fcf_per_share, net_margin,
+                         operating_margin, gross_margin, debt_to_equity,
+                         current_ratio, quick_ratio,
+                         payout_ratio, book_value, eps, ev, market_cap, data_source)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
                     ON CONFLICT (symbol, date, period_type) DO UPDATE SET
                         market=EXCLUDED.market,
-                        pe_ratio=EXCLUDED.pe_ratio, pb_ratio=EXCLUDED.pb_ratio,
-                        ps_ratio=EXCLUDED.ps_ratio, ev_to_ebitda=EXCLUDED.ev_to_ebitda,
-                        ev_to_revenue=EXCLUDED.ev_to_revenue,
-                        roe=EXCLUDED.roe, roa=EXCLUDED.roa, roic=EXCLUDED.roic,
-                        fcf_margin=EXCLUDED.fcf_margin, net_margin=EXCLUDED.net_margin,
-                        operating_margin=EXCLUDED.operating_margin, gross_margin=EXCLUDED.gross_margin,
-                        current_ratio=EXCLUDED.current_ratio, quick_ratio=EXCLUDED.quick_ratio,
-                        payout_ratio=EXCLUDED.payout_ratio, book_value=EXCLUDED.book_value,
-                        eps=EXCLUDED.eps, ev=EXCLUDED.ev, data_source=EXCLUDED.data_source
+                        pe_ratio=COALESCE(EXCLUDED.pe_ratio, valuation_history.pe_ratio),
+                        pb_ratio=COALESCE(EXCLUDED.pb_ratio, valuation_history.pb_ratio),
+                        ps_ratio=COALESCE(EXCLUDED.ps_ratio, valuation_history.ps_ratio),
+                        ev_to_ebitda=COALESCE(EXCLUDED.ev_to_ebitda, valuation_history.ev_to_ebitda),
+                        ev_to_revenue=COALESCE(EXCLUDED.ev_to_revenue, valuation_history.ev_to_revenue),
+                        roe=COALESCE(EXCLUDED.roe, valuation_history.roe),
+                        roa=COALESCE(EXCLUDED.roa, valuation_history.roa),
+                        roic=COALESCE(EXCLUDED.roic, valuation_history.roic),
+                        fcf_margin=COALESCE(EXCLUDED.fcf_margin, valuation_history.fcf_margin),
+                        fcf_per_share=COALESCE(EXCLUDED.fcf_per_share, valuation_history.fcf_per_share),
+                        net_margin=COALESCE(EXCLUDED.net_margin, valuation_history.net_margin),
+                        operating_margin=COALESCE(EXCLUDED.operating_margin, valuation_history.operating_margin),
+                        gross_margin=COALESCE(EXCLUDED.gross_margin, valuation_history.gross_margin),
+                        debt_to_equity=COALESCE(EXCLUDED.debt_to_equity, valuation_history.debt_to_equity),
+                        current_ratio=COALESCE(EXCLUDED.current_ratio, valuation_history.current_ratio),
+                        quick_ratio=COALESCE(EXCLUDED.quick_ratio, valuation_history.quick_ratio),
+                        payout_ratio=COALESCE(EXCLUDED.payout_ratio, valuation_history.payout_ratio),
+                        book_value=COALESCE(EXCLUDED.book_value, valuation_history.book_value),
+                        eps=COALESCE(EXCLUDED.eps, valuation_history.eps),
+                        ev=COALESCE(EXCLUDED.ev, valuation_history.ev),
+                        market_cap=COALESCE(EXCLUDED.market_cap, valuation_history.market_cap),
+                        data_source=EXCLUDED.data_source
                     """,
                     symbol, market, r["date"], r["period_type"],
                     r.get("pe_ratio"), r.get("pb_ratio"), r.get("ps_ratio"),
                     r.get("ev_to_ebitda"), r.get("ev_to_revenue"),
                     r.get("roe"), r.get("roa"), r.get("roic"),
-                    r.get("fcf_margin"), r.get("net_margin"),
+                    r.get("fcf_margin"), r.get("fcf_per_share"), r.get("net_margin"),
                     r.get("operating_margin"), r.get("gross_margin"),
+                    r.get("debt_to_equity"),
                     r.get("current_ratio"), r.get("quick_ratio"),
                     r.get("payout_ratio"), r.get("book_value"),
-                    r.get("eps"), r.get("ev"), "finnhub",
+                    r.get("eps"), r.get("ev"), r.get("market_cap"),
+                    r.get("data_source", "finnhub"),
                 )
                 count += 1
     except Exception as exc:
@@ -736,6 +764,14 @@ def _parse_valuation_series(series: dict, market: str) -> list[dict]:
             record = {"date": period_date, "period_type": period_type}
             record.update(cols)
             records.append(record)
+
+    # Inject market_cap snapshot from metric into the latest quarterly record
+    mcap = series.get("_market_cap")
+    if mcap is not None and records:
+        quarterly = [r for r in records if r["period_type"] == "quarterly"]
+        if quarterly:
+            latest = max(quarterly, key=lambda r: r["date"])
+            latest["market_cap"] = mcap
 
     return records
 

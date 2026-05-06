@@ -491,7 +491,13 @@ class FinnhubProvider(DataProvider):
             data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
             if not data:
                 return None
-            return data.get("series") or None
+            result = data.get("series") or {}
+            metric = data.get("metric")
+            if metric and isinstance(metric, dict):
+                mcap = metric.get("marketCapitalization")
+                if mcap is not None:
+                    result["_market_cap"] = float(mcap)
+            return result or None
         except Exception as e:
             logger.error("Finnhub valuation_series error for %s: %s", symbol, e)
             return None
