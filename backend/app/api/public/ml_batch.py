@@ -34,10 +34,10 @@ VALID_MARKETS = {"us", "hk", "cn"}
 # ---------------------------------------------------------------------------
 
 class BatchRequest(BaseModel):
-    symbols: list[str] = Field(..., min_length=1, max_length=500)
+    symbols: list[str] = Field(..., min_length=1, max_length=3000)
     start_date: Optional[date] = None
     end_date: Optional[date] = None
-    limit_per_symbol: int = Field(500, ge=1, le=2000)
+    limit_per_symbol: int = Field(500, ge=1, le=5000)
 
 
 def _fill_defaults(req: BatchRequest) -> tuple[date | None, date | None]:
