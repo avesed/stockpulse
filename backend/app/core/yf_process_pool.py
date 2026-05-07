@@ -124,6 +124,8 @@ def _yf_dispatch(method: str, kw: dict) -> Any:
             return _do_ticker_market_index(kw)
         elif method == "ticker_data_get":
             return _do_ticker_data_get(kw)
+        elif method == "ticker_earnings_dates":
+            return _do_ticker_earnings_dates(kw)
         elif method == "batch_download":
             return _do_batch_download(kw)
         else:
@@ -442,6 +444,31 @@ def _do_ticker_data_get(kw: dict) -> Optional[dict]:
     if resp is None:
         return None
     return resp.json()
+
+
+def _do_ticker_earnings_dates(kw: dict) -> Optional[list[dict]]:
+    symbol = kw["symbol"]
+    limit = kw.get("limit", 20)
+    ticker = _yf.Ticker(symbol)
+    df = ticker.get_earnings_dates(limit=limit)
+    _clear_cache(ticker)
+    if df is None or df.empty:
+        return None
+    records = []
+    for idx, row in df.iterrows():
+        dt = idx
+        if hasattr(dt, 'date'):
+            dt = dt.date()
+        else:
+            dt = _pd.Timestamp(dt).date()
+        records.append({
+            "symbol": symbol,
+            "earnings_date": dt.isoformat(),
+            "eps_estimate": float(row["EPS Estimate"]) if _pd.notna(row.get("EPS Estimate")) else None,
+            "eps_actual": float(row["Reported EPS"]) if _pd.notna(row.get("Reported EPS")) else None,
+            "surprise_pct": float(row["Surprise(%)"]) if _pd.notna(row.get("Surprise(%)")) else None,
+        })
+    return records
 
 
 def _do_batch_download(kw: dict) -> Optional[dict[str, list[dict]]]:

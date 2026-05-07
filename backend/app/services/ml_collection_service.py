@@ -540,18 +540,24 @@ async def _upsert_sec_financials(pool, symbol: str, records: list[dict]) -> int:
 
 
 async def _upsert_earnings_calendar(pool, records: list[dict]) -> int:
-    """Upsert earnings calendar entries."""
+    """Upsert earnings calendar entries (supports both Finnhub and YFinance formats)."""
     if not records:
         return 0
     count = 0
     try:
         async with pool.acquire(timeout=5) as conn:
             for r in records:
-                earnings_date_str = r.get("date")
+                earnings_date_str = r.get("date") or r.get("earnings_date")
                 symbol = r.get("symbol")
                 if not earnings_date_str or not symbol:
                     continue
                 earnings_date = date.fromisoformat(earnings_date_str) if isinstance(earnings_date_str, str) else earnings_date_str
+                eps_est = r.get("epsEstimate") or r.get("eps_estimate")
+                eps_act = r.get("epsActual") or r.get("eps_actual")
+                rev_est = r.get("revenueEstimate") or r.get("revenue_estimate")
+                rev_act = r.get("revenueActual") or r.get("revenue_actual")
+                quarter = r.get("quarter")
+                year = r.get("year")
                 await conn.execute(
                     """
                     INSERT INTO earnings_calendar
@@ -559,16 +565,17 @@ async def _upsert_earnings_calendar(pool, records: list[dict]) -> int:
                          revenue_estimate, revenue_actual, quarter, year)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     ON CONFLICT (symbol, earnings_date) DO UPDATE SET
-                        eps_estimate=EXCLUDED.eps_estimate, eps_actual=EXCLUDED.eps_actual,
-                        revenue_estimate=EXCLUDED.revenue_estimate,
-                        revenue_actual=EXCLUDED.revenue_actual,
-                        quarter=EXCLUDED.quarter, year=EXCLUDED.year
+                        eps_estimate=COALESCE(EXCLUDED.eps_estimate, earnings_calendar.eps_estimate),
+                        eps_actual=COALESCE(EXCLUDED.eps_actual, earnings_calendar.eps_actual),
+                        revenue_estimate=COALESCE(EXCLUDED.revenue_estimate, earnings_calendar.revenue_estimate),
+                        revenue_actual=COALESCE(EXCLUDED.revenue_actual, earnings_calendar.revenue_actual),
+                        quarter=COALESCE(EXCLUDED.quarter, earnings_calendar.quarter),
+                        year=COALESCE(EXCLUDED.year, earnings_calendar.year)
                     """,
                     symbol, earnings_date,
-                    r.get("epsEstimate"), r.get("epsActual"),
-                    r.get("revenueEstimate"), r.get("revenueActual"),
-                    str(r["quarter"]) if r.get("quarter") is not None else None,
-                    r.get("year"),
+                    eps_est, eps_act, rev_est, rev_act,
+                    str(quarter) if quarter is not None else None,
+                    year,
                 )
                 count += 1
     except Exception as exc:
@@ -1133,7 +1140,7 @@ async def collect_economic_indicators(
 async def collect_macro_daily(
     market: str = "us", *, triggered_by: str = "api",
 ) -> dict[str, Any]:
-    """Batch-download macro indicators via yf.download() for the last 5 days."""
+    """Batch-download macro indicators via yf.download() for the last 7 days."""
     lock_key = f"sp:ml:macro_daily:{market}:lock"
     progress_key = f"sp:ml:macro_daily:{market}:progress"
 
@@ -1404,6 +1411,87 @@ async def backfill_valuation_history(
     return await _run_job(
         "backfill_valuation", market, _per_symbol, "finnhub", triggered_by,
         batch_size=3, delay=8.0,
+    )
+
+
+# 15. Backfill Macro Daily — per-ticker parallel via process pool
+async def backfill_macro_daily(
+    market: str = "us", *, triggered_by: str = "api",
+) -> dict[str, Any]:
+    """Backfill macro indicators with ~3 years of daily data, one ticker at a time."""
+    from app.core.provider_queue import Priority, submit
+    from app.core.executor import ExecutorPool
+    from app.core.yf_process_pool import yf_call
+
+    lock_key = "sp:ml:backfill_macro:us:lock"
+    owner = await _acquire_lock(lock_key)
+    if owner is None:
+        return {"symbol_count": 0, "errors": ["Already running"]}
+
+    pool = get_db_pool()
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=1100)
+    upserted = 0
+    errors: list[dict] = []
+
+    try:
+        for ticker, indicator_name in MACRO_TICKERS.items():
+            try:
+                bars = await submit(
+                    "yfinance", yf_call, "ticker_history",
+                    {"symbol": ticker, "start": start.isoformat(), "end": end.isoformat()},
+                    priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+                    timeout=120.0,
+                )
+                if not bars:
+                    continue
+                rows = []
+                for bar in bars:
+                    close_val = bar.get("close")
+                    if close_val is None:
+                        continue
+                    bar_date_str = bar.get("date", "")[:10]
+                    try:
+                        bar_date = date.fromisoformat(bar_date_str)
+                    except (ValueError, TypeError):
+                        continue
+                    rows.append({
+                        "date": bar_date,
+                        "close": float(close_val),
+                        "open": float(bar["open"]) if bar.get("open") is not None else None,
+                        "high": float(bar["high"]) if bar.get("high") is not None else None,
+                        "low": float(bar["low"]) if bar.get("low") is not None else None,
+                        "volume": int(bar["volume"]) if bar.get("volume") is not None else None,
+                    })
+                count = await _upsert_macro_daily(pool, ticker, indicator_name, rows)
+                upserted += count
+                logger.info("[backfill_macro] %s (%s): %d rows", ticker, indicator_name, count)
+            except Exception as exc:
+                logger.warning("[backfill_macro] %s failed: %s", ticker, exc)
+                errors.append({"symbol": ticker, "error": str(exc), "category": "fetch"})
+
+        logger.info("[backfill_macro] done: %d rows upserted", upserted)
+        return {"symbol_count": len(MACRO_TICKERS), "upserted": upserted, "errors": errors}
+    finally:
+        await _release_lock(lock_key, owner)
+
+
+# 16. Backfill Earnings Calendar — YFinance per-symbol historical earnings dates
+async def backfill_earnings_calendar(
+    market: str = "us", *, triggered_by: str = "api",
+) -> dict[str, Any]:
+    """Backfill historical earnings dates from YFinance (per-symbol)."""
+    market = market.lower()
+
+    async def _per_symbol(pool, sym, provider, today):
+        data = await provider.get_earnings_dates(sym, limit=20)
+        if data is None or len(data) == 0:
+            return 0
+        return await _upsert_earnings_calendar(pool, data)
+
+    return await _run_job(
+        "backfill_earnings_cal", market, _per_symbol, "yfinance", triggered_by,
+        batch_size=5, delay=2.0,
     )
 
 

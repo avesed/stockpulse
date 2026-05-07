@@ -598,6 +598,7 @@ _VALID_ML_JOBS = {
     "sec_financials", "earnings_calendar", "options_sentiment",
     "short_interest", "economic_indicators", "macro_daily",
     "cn_alternative",
+    "backfill_macro_daily", "backfill_earnings_calendar",
 }
 _running_ml_tasks: dict[str, asyncio.Task] = {}
 
@@ -624,7 +625,8 @@ async def trigger_ml_collect(job_type: str, market: str) -> dict[str, Any]:
 
     from app.services import ml_collection_service
 
-    fn = getattr(ml_collection_service, f"collect_{job_type}", None)
+    fn = getattr(ml_collection_service, f"collect_{job_type}", None) or \
+         getattr(ml_collection_service, job_type, None)
     if fn is None:
         raise HTTPException(status_code=400, detail=f"No collect function for {job_type}")
 

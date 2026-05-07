@@ -829,6 +829,21 @@ class YFinanceProvider(DataProvider):
             logger.warning("YFinance upgrades_downgrades error for %s: %s", symbol, e)
             return None
 
+    async def get_earnings_dates(
+        self, symbol: str, limit: int = 20,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Get historical + upcoming earnings dates with EPS estimates."""
+        try:
+            records = await submit(
+                "yfinance", yf_call, "ticker_earnings_dates",
+                {"symbol": symbol, "limit": limit},
+                priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND,
+            )
+            return records or None
+        except Exception as e:
+            logger.warning("YFinance earnings_dates error for %s: %s", symbol, e)
+            return None
+
     async def get_valuation_measures(
         self, symbol: str
     ) -> Optional[List[Dict[str, Any]]]:
