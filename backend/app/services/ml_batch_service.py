@@ -274,8 +274,17 @@ async def batch_sectors(
 ) -> dict[str, dict[str, Any]]:
     pool = get_db_pool()
     rows = await pool.fetch(
-        "SELECT symbol, market, name, sector, industry, concepts "
-        "FROM stock_profiles WHERE symbol = ANY($1)",
+        """
+        SELECT p.symbol, p.market, p.name, p.sector, p.industry, p.concepts,
+               v.market_cap
+        FROM stock_profiles p
+        LEFT JOIN LATERAL (
+            SELECT market_cap FROM valuation_history
+            WHERE symbol = p.symbol AND market_cap IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        ) v ON true
+        WHERE p.symbol = ANY($1)
+        """,
         symbols,
     )
     return {
@@ -285,6 +294,7 @@ async def batch_sectors(
             "sector": r["sector"],
             "industry": r["industry"],
             "concepts": r["concepts"],
+            "market_cap": r["market_cap"],
         }
         for r in rows
     }

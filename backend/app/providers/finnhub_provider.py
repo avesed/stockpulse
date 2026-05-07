@@ -473,21 +473,26 @@ class FinnhubProvider(DataProvider):
         if not self.is_available():
             return None
 
-        client, key = self._get_client()
-        if not client:
-            return None
-
-        try:
-            def fetch():
+        def fetch():
+            import time
+            for attempt in range(3):
+                client, key = self._get_client()
+                if not client:
+                    time.sleep(5)
+                    continue
                 try:
                     return client.company_basic_financials(symbol, 'all')
                 except Exception as e:
                     if _is_rate_limit_error(e):
                         mark_key_rate_limited("finnhub", key)
+                        time.sleep(2)
+                        continue
                     else:
                         logger.warning("Finnhub valuation_series error for %s: %s", symbol, e)
                     return None
+            return None
 
+        try:
             data = await submit("finnhub", fetch, priority=Priority.SCHEDULED, pool=ExecutorPool.BACKGROUND)
             if not data:
                 return None
