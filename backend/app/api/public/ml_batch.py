@@ -50,9 +50,10 @@ def _fill_defaults(req: BatchRequest) -> tuple[date | None, date | None]:
 
 def _market_defaults(
     start_date: date | None, end_date: date | None,
+    days: int | None = None,
 ) -> tuple[date, date]:
     end = end_date or date.today()
-    start = start_date or (end - timedelta(days=30))
+    start = start_date or (end - timedelta(days=days or 30))
     return start, end
 
 
@@ -176,6 +177,7 @@ async def batch_sectors(req: BatchRequest):
 @router.get("/market/breadth/{market}", response_model=ApiResponse[dict])
 async def get_market_breadth(
     market: str = Path(..., description="us / hk / cn"),
+    days: Optional[int] = Query(None, ge=1, le=1500, description="Lookback calendar days"),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
 ):
@@ -183,7 +185,7 @@ async def get_market_breadth(
     if market.lower() not in VALID_MARKETS:
         return ApiResponse(success=False, error=f"Invalid market: {market}. Use: us, hk, cn")
     t0 = time.monotonic()
-    start, end = _market_defaults(start_date, end_date)
+    start, end = _market_defaults(start_date, end_date, days)
     from app.services import ml_batch_service
     data = await ml_batch_service.market_breadth(market, start, end)
     elapsed = int((time.monotonic() - t0) * 1000)
@@ -196,6 +198,7 @@ async def get_market_breadth(
 @router.get("/market/volume/{market}", response_model=ApiResponse[dict])
 async def get_market_volume(
     market: str = Path(..., description="us / hk / cn"),
+    days: Optional[int] = Query(None, ge=1, le=1500, description="Lookback calendar days"),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
 ):
@@ -203,7 +206,7 @@ async def get_market_volume(
     if market.lower() not in VALID_MARKETS:
         return ApiResponse(success=False, error=f"Invalid market: {market}. Use: us, hk, cn")
     t0 = time.monotonic()
-    start, end = _market_defaults(start_date, end_date)
+    start, end = _market_defaults(start_date, end_date, days)
     from app.services import ml_batch_service
     data = await ml_batch_service.market_volume(market, start, end)
     elapsed = int((time.monotonic() - t0) * 1000)
@@ -216,6 +219,7 @@ async def get_market_volume(
 @router.get("/market/sector-returns/{market}", response_model=ApiResponse[dict])
 async def get_market_sector_returns(
     market: str = Path(..., description="us / hk / cn"),
+    days: Optional[int] = Query(None, ge=1, le=1500, description="Lookback calendar days"),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
 ):
@@ -223,7 +227,7 @@ async def get_market_sector_returns(
     if market.lower() not in VALID_MARKETS:
         return ApiResponse(success=False, error=f"Invalid market: {market}. Use: us, hk, cn")
     t0 = time.monotonic()
-    start, end = _market_defaults(start_date, end_date)
+    start, end = _market_defaults(start_date, end_date, days)
     from app.services import ml_batch_service
     data = await ml_batch_service.market_sector_returns(market, start, end)
     elapsed = int((time.monotonic() - t0) * 1000)
