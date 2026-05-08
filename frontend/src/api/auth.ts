@@ -22,6 +22,13 @@ export async function logout(refreshToken: string | null): Promise<void> {
   await apiClient.post('/auth/logout', { refreshToken })
 }
 
+export async function changePassword(data: {
+  currentPassword: string
+  newPassword: string
+}): Promise<void> {
+  await apiClient.post('/auth/change-password', data)
+}
+
 export async function getMe(): Promise<User> {
   const response = await apiClient.get<User>('/auth/me')
   return response.data

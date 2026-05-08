@@ -11,8 +11,8 @@ import { useThemeStore } from '@/stores/themeStore'
 import { getErrorMessage } from '@/api/client'
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [username, setUsername] = useState('admin')
+  const [password, setPassword] = useState('Admin123')
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -27,7 +27,7 @@ export default function LoginPage() {
     setIsSubmitting(true)
 
     try {
-      await login(email, password)
+      await login(username, password)
       navigate('/')
     } catch (err) {
       setError(getErrorMessage(err))
@@ -68,15 +68,15 @@ export default function LoginPage() {
               </div>
             )}
             <div className="space-y-2">
-              <Label htmlFor="email">{t('common.email')}</Label>
+              <Label htmlFor="username">{t('common.username')}</Label>
               <Input
-                id="email"
-                type="email"
-                placeholder={t('login.emailPlaceholder')}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                id="username"
+                type="text"
+                placeholder={t('login.usernamePlaceholder')}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 required
-                autoComplete="email"
+                autoComplete="username"
               />
             </div>
             <div className="space-y-2">

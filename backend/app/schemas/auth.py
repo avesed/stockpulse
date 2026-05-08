@@ -30,6 +30,11 @@ class LogoutRequest(CamelModel):
     refresh_token: str | None = None
 
 
+class ChangePasswordRequest(CamelModel):
+    current_password: str
+    new_password: str
+
+
 class UserResponse(CamelModel):
     id: int
     email: str

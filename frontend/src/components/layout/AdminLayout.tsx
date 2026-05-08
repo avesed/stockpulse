@@ -14,11 +14,22 @@ import {
   Sun,
   Moon,
   Monitor,
+  KeyRound,
+  Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,6 +46,9 @@ import {
 } from '@/components/ui/tooltip'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { changePassword } from '@/api/auth'
+import { getErrorMessage } from '@/api/client'
+import { showToast, showErrorToast } from '@/stores/toastStore'
 
 const navItems = [
   { path: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard' },
@@ -47,6 +61,12 @@ const navItems = [
 
 export function AdminLayout() {
   const [collapsed, setCollapsed] = useState(false)
+  const [pwdOpen, setPwdOpen] = useState(false)
+  const [currentPwd, setCurrentPwd] = useState('')
+  const [newPwd, setNewPwd] = useState('')
+  const [confirmPwd, setConfirmPwd] = useState('')
+  const [pwdError, setPwdError] = useState('')
+  const [pwdSubmitting, setPwdSubmitting] = useState(false)
   const location = useLocation()
   const { t } = useTranslation()
   const { user, logout } = useAuthStore()
@@ -54,6 +74,32 @@ export function AdminLayout() {
 
   const handleLogout = async () => {
     await logout()
+  }
+
+  const resetPwdForm = () => {
+    setCurrentPwd('')
+    setNewPwd('')
+    setConfirmPwd('')
+    setPwdError('')
+  }
+
+  const handleChangePassword = async () => {
+    setPwdError('')
+    if (newPwd !== confirmPwd) {
+      setPwdError(t('changePassword.mismatch'))
+      return
+    }
+    setPwdSubmitting(true)
+    try {
+      await changePassword({ currentPassword: currentPwd, newPassword: newPwd })
+      showToast(t('common.success'), t('changePassword.success'))
+      setPwdOpen(false)
+      resetPwdForm()
+    } catch (err) {
+      setPwdError(getErrorMessage(err))
+    } finally {
+      setPwdSubmitting(false)
+    }
   }
 
   const cycleTheme = () => {
@@ -170,16 +216,20 @@ export function AdminLayout() {
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm" className="gap-2">
                     <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-medium">
-                      {user?.email?.charAt(0).toUpperCase()}
+                      {(user?.displayName ?? user?.email ?? '?').charAt(0).toUpperCase()}
                     </div>
                     {!collapsed && (
-                      <span className="text-sm">{user?.email}</span>
+                      <span className="text-sm">{user?.displayName ?? user?.email?.split('@')[0]}</span>
                     )}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuLabel>{user?.email}</DropdownMenuLabel>
+                  <DropdownMenuLabel>{user?.displayName ?? user?.email?.split('@')[0]}</DropdownMenuLabel>
                   <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => { resetPwdForm(); setPwdOpen(true) }}>
+                    <KeyRound className="mr-2 h-4 w-4" />
+                    {t('changePassword.title')}
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleLogout}>
                     <LogOut className="mr-2 h-4 w-4" />
                     {t('common.logout')}
@@ -196,6 +246,40 @@ export function AdminLayout() {
             </div>
           </main>
         </div>
+
+        <Dialog open={pwdOpen} onOpenChange={(open) => { setPwdOpen(open); if (!open) resetPwdForm() }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t('changePassword.title')}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              {pwdError && (
+                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  {pwdError}
+                </div>
+              )}
+              <div className="space-y-2">
+                <Label>{t('changePassword.currentPassword')}</Label>
+                <Input type="password" value={currentPwd} onChange={(e) => setCurrentPwd(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('changePassword.newPassword')}</Label>
+                <Input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('changePassword.confirmPassword')}</Label>
+                <Input type="password" value={confirmPwd} onChange={(e) => setConfirmPwd(e.target.value)} />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPwdOpen(false)}>{t('common.cancel')}</Button>
+              <Button onClick={handleChangePassword} disabled={!currentPwd || !newPwd || !confirmPwd || pwdSubmitting}>
+                {pwdSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {t('common.save')}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </TooltipProvider>
   )

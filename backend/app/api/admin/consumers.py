@@ -135,6 +135,24 @@ async def deactivate_consumer(
     consumer.updated_at = datetime.now(timezone.utc)
 
 
+@router.delete("/{consumer_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_consumer(
+    consumer_id: UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete an API consumer."""
+    result = await db.execute(
+        select(ApiConsumer).where(ApiConsumer.id == consumer_id)
+    )
+    consumer = result.scalar_one_or_none()
+    if consumer is None:
+        raise HTTPException(status_code=404, detail="Consumer not found")
+
+    logger.info("API consumer permanently deleted: %s (prefix=%s)", consumer.name, consumer.api_key_prefix)
+    await db.delete(consumer)
+
+
 @router.get("/{consumer_id}/usage", response_model=ConsumerUsageResponse)
 async def consumer_usage(
     consumer_id: UUID,

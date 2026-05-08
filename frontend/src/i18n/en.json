@@ -12,6 +12,7 @@
     "logout": "Logout",
     "register": "Register",
     "email": "Email",
+    "username": "Username",
     "password": "Password",
     "submit": "Submit",
     "cancel": "Cancel",
@@ -44,10 +45,17 @@
   "login": {
     "title": "Sign in to StockPulse",
     "subtitle": "Stock Data Platform Admin",
-    "emailPlaceholder": "Enter your email",
+    "usernamePlaceholder": "Enter username",
     "passwordPlaceholder": "Enter your password",
-    "loginButton": "Sign In",
-    "registerLink": "Don't have an account? Register"
+    "loginButton": "Sign In"
+  },
+  "changePassword": {
+    "title": "Change Password",
+    "currentPassword": "Current Password",
+    "newPassword": "New Password",
+    "confirmPassword": "Confirm New Password",
+    "mismatch": "Passwords do not match",
+    "success": "Password changed successfully"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -107,6 +115,8 @@
     "lastUsed": "Last Used",
     "deactivate": "Deactivate",
     "activate": "Activate",
+    "deleteConsumer": "Delete",
+    "confirmDelete": "Are you sure you want to permanently delete this consumer? This cannot be undone.",
     "perMinute": "/min"
   },
   "providers": {

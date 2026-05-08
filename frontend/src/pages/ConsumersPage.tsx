@@ -18,7 +18,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { getConsumers, createConsumer, deactivateConsumer } from '@/api/admin'
+import { getConsumers, createConsumer, deactivateConsumer, deleteConsumer } from '@/api/admin'
 import { getErrorMessage } from '@/api/client'
 import { showToast, showErrorToast } from '@/stores/toastStore'
 import { formatDate } from '@/lib/utils'
@@ -51,11 +51,23 @@ export default function ConsumersPage() {
     onError: (err) => showErrorToast(t('common.error'), getErrorMessage(err)),
   })
 
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+
   const deactivateMutation = useMutation({
     mutationFn: (id: string) => deactivateConsumer(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['consumers'] })
       showToast(t('common.success'))
+    },
+    onError: (err) => showErrorToast(t('common.error'), getErrorMessage(err)),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteConsumer(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['consumers'] })
+      showToast(t('common.success'))
+      setDeleteTarget(null)
     },
     onError: (err) => showErrorToast(t('common.error'), getErrorMessage(err)),
   })
@@ -222,14 +234,25 @@ export default function ConsumersPage() {
                         </Badge>
                       </td>
                       <td className="py-3">
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => deactivateMutation.mutate(consumer.id)}
-                          disabled={!consumer.isActive || deactivateMutation.isPending}
-                        >
-                          {t('consumers.deactivate')}
-                        </Button>
+                        <div className="flex gap-1">
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => deactivateMutation.mutate(consumer.id)}
+                            disabled={!consumer.isActive || deactivateMutation.isPending}
+                          >
+                            {t('consumers.deactivate')}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteTarget(consumer.id)}
+                            disabled={deleteMutation.isPending}
+                          >
+                            {t('consumers.deleteConsumer')}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -241,6 +264,26 @@ export default function ConsumersPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('common.confirm')}</DialogTitle>
+            <DialogDescription>{t('consumers.confirmDelete')}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget)}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t('common.delete')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

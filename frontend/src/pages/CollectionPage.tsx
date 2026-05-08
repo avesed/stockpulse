@@ -19,11 +19,13 @@ import {
   startProfileCollection,
   getFundamentalsProgress,
   startFundamentals,
+  getMlProgress,
+  startMlCollection,
   getSchedulerStatus,
   getCollectionRuns,
   getCollectionRunDetail,
 } from '@/api/admin'
-import type { FundProgress } from '@/api/admin'
+import type { FundProgress, MlProgress } from '@/api/admin'
 import { getErrorMessage } from '@/api/client'
 import { showToast, showErrorToast } from '@/stores/toastStore'
 import { useCollectionProgressWs } from '@/hooks/useCollectionProgress'
@@ -604,6 +606,140 @@ function FundamentalsPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// MLPanel
+// ---------------------------------------------------------------------------
+
+const ML_JOB_LABELS: Record<string, string> = {
+  valuation_history: 'Valuation History',
+  insider_sentiment: 'Insider Sentiment',
+  insider_transactions: 'Insider Transactions',
+  earnings_surprises: 'Earnings Surprises',
+  recommendation_trends: 'Recommendation Trends',
+  upgrades_downgrades: 'Upgrades/Downgrades',
+  sec_financials: 'SEC Financials',
+  earnings_calendar: 'Earnings Calendar',
+  options_sentiment: 'Options Sentiment',
+  short_interest: 'Short Interest',
+  economic_indicators: 'Economic Indicators',
+  macro_daily: 'Macro Daily',
+  cn_alternative: 'CN Alternative',
+}
+
+function MLPanel() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [selectedMarket, setSelectedMarket] = useState<string>('us')
+
+  const { data: jobs, isLoading } = useQuery({
+    queryKey: ['ml-progress', selectedMarket],
+    queryFn: () => getMlProgress(selectedMarket),
+    refetchInterval: (query) => {
+      const items = query.state.data
+      if (items?.some((j: MlProgress) => j.taskRunning)) return 3000
+      return false
+    },
+  })
+
+  const triggerMutation = useMutation({
+    mutationFn: (jobType: string) => startMlCollection(jobType, selectedMarket),
+    onSuccess: (_d, jobType) => {
+      showToast(t('common.success'), `${ML_JOB_LABELS[jobType] ?? jobType} started for ${selectedMarket.toUpperCase()}`)
+      queryClient.invalidateQueries({ queryKey: ['ml-progress', selectedMarket] })
+    },
+    onError: (err) => showErrorToast(t('common.error'), getErrorMessage(err)),
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg">ML Data Collection</CardTitle>
+          <div className="flex gap-1">
+            {(['us', 'cn', 'hk'] as const).map((m) => (
+              <Button
+                key={m}
+                size="sm"
+                variant={selectedMarket === m ? 'default' : 'outline'}
+                onClick={() => setSelectedMarket(m)}
+              >
+                {m.toUpperCase()}
+              </Button>
+            ))}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {(jobs ?? []).map((job) => {
+              const p = job.progress
+              const pct = p && (p.total ?? 0) > 0
+                ? Math.round(((p.current ?? 0) / (p.total ?? 1)) * 100)
+                : 0
+
+              return (
+                <div key={job.jobType} className="flex items-center gap-3">
+                  <div className="w-48 shrink-0">
+                    <span className="text-sm font-medium">{ML_JOB_LABELS[job.jobType] ?? job.jobType}</span>
+                  </div>
+
+                  {job.taskRunning && p ? (
+                    <div className="flex-1 space-y-1">
+                      <Progress value={pct} className="h-1.5" />
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span>{p.current}/{p.total} ({pct}%)</span>
+                        <span>{p.message}</span>
+                        {p.elapsedSeconds != null && (
+                          <span className="flex items-center gap-1">
+                            <Timer className="h-3 w-3" />
+                            {formatDuration(p.elapsedSeconds)}
+                          </span>
+                        )}
+                        {(p.errorsCount ?? 0) > 0 && (
+                          <span className="text-red-500">{p.errorsCount} errors</span>
+                        )}
+                        {p.estimatedRemaining != null && p.estimatedRemaining > 0 && (
+                          <span className="flex items-center gap-1">
+                            <Clock className="h-3 w-3" />
+                            ETA {formatDuration(p.estimatedRemaining)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1">
+                      <Badge variant="secondary" className="text-xs">{t('collection.idle')}</Badge>
+                    </div>
+                  )}
+
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0"
+                    onClick={() => triggerMutation.mutate(job.jobType)}
+                    disabled={job.taskRunning || triggerMutation.isPending}
+                  >
+                    {job.taskRunning ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // SchedulePanel
 // ---------------------------------------------------------------------------
 
@@ -715,6 +851,9 @@ export default function CollectionPage() {
 
       {/* Fundamentals */}
       <FundamentalsPanel />
+
+      {/* ML Data */}
+      <MLPanel />
 
       {/* Stock list / profiles */}
       <StockListPanel />

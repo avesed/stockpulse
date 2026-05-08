@@ -37,6 +37,10 @@ export async function deactivateConsumer(id: string): Promise<void> {
   await apiClient.delete(`/admin/consumers/${id}`)
 }
 
+export async function deleteConsumer(id: string): Promise<void> {
+  await apiClient.delete(`/admin/consumers/${id}/permanent`)
+}
+
 // Providers
 export async function getProviders(): Promise<ProviderConfig[]> {
   const response = await apiClient.get<ProviderConfig[]>('/admin/providers')
@@ -160,6 +164,48 @@ export async function startProfileCollection(market: string): Promise<{ status: 
     `/admin/collection/stock-profiles/${market}/collect`
   )
   return response.data
+}
+
+// Collection — ML
+export interface MlProgress {
+  jobType: string
+  market: string
+  progress: {
+    current: number
+    total: number
+    message: string
+    elapsedSeconds: number | null
+    errorsCount: number
+    estimatedRemaining: number | null
+    startedAt: string | null
+  } | null
+  taskRunning: boolean
+}
+
+const ML_JOBS = [
+  'valuation_history', 'insider_sentiment', 'insider_transactions',
+  'earnings_surprises', 'recommendation_trends', 'upgrades_downgrades',
+  'sec_financials', 'earnings_calendar', 'options_sentiment',
+  'short_interest', 'economic_indicators', 'macro_daily', 'cn_alternative',
+] as const
+
+export async function getMlProgress(market: string): Promise<MlProgress[]> {
+  const results = await Promise.all(
+    ML_JOBS.map(async (job) => {
+      try {
+        const r = await apiClient.get<MlProgress>(`/admin/collection/ml/${job}/${market}/progress`)
+        return r.data
+      } catch {
+        return { jobType: job, market, progress: null, taskRunning: false }
+      }
+    })
+  )
+  return results
+}
+
+export async function startMlCollection(jobType: string, market: string): Promise<{ status: string }> {
+  const r = await apiClient.post<{ status: string }>(`/admin/collection/ml/${jobType}/${market}/collect`)
+  return r.data
 }
 
 // Scheduler

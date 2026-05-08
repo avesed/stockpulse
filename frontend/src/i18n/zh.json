@@ -12,6 +12,7 @@
     "logout": "退出登录",
     "register": "注册",
     "email": "邮箱",
+    "username": "用户名",
     "password": "密码",
     "submit": "提交",
     "cancel": "取消",
@@ -44,10 +45,17 @@
   "login": {
     "title": "登录 StockPulse",
     "subtitle": "股票数据平台管理后台",
-    "emailPlaceholder": "请输入邮箱",
+    "usernamePlaceholder": "请输入用户名",
     "passwordPlaceholder": "请输入密码",
-    "loginButton": "登录",
-    "registerLink": "没有账号？注册"
+    "loginButton": "登录"
+  },
+  "changePassword": {
+    "title": "修改密码",
+    "currentPassword": "当前密码",
+    "newPassword": "新密码",
+    "confirmPassword": "确认新密码",
+    "mismatch": "两次输入的密码不一致",
+    "success": "密码修改成功"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -107,6 +115,8 @@
     "lastUsed": "最后使用",
     "deactivate": "停用",
     "activate": "启用",
+    "deleteConsumer": "删除",
+    "confirmDelete": "确认永久删除此消费者？此操作不可撤销。",
     "perMinute": "次/分钟"
   },
   "providers": {
