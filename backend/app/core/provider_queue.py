@@ -32,7 +32,7 @@ from enum import IntEnum
 from functools import partial
 from typing import Any, Callable, Optional, TypeVar
 
-from app.core.executor import ExecutorPool
+from app.core.executor import ExecutorPool, get_executor
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +263,7 @@ class ProviderQueue:
             loop = asyncio.get_running_loop()
             call = partial(item.func, *item.args, **item.kwargs) if item.kwargs else partial(item.func, *item.args)
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, call),
+                loop.run_in_executor(get_executor(item.pool), call),
                 timeout=item.timeout,
             )
             if not item.future.done():

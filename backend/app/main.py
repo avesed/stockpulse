@@ -57,6 +57,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.core.secrets import bootstrap_jwt_secret
     await bootstrap_jwt_secret()
 
+    # Seed default admin if no admin user exists
+    from app.core.orm import get_session_factory
+    from sqlalchemy import select
+    _sf = get_session_factory()
+    async with _sf() as _session:
+        from app.models.user import User
+        _admin = (await _session.execute(
+            select(User.id).where(User.role == "admin").limit(1)
+        )).first()
+        if not _admin:
+            from app.core.auth import hash_password
+            _session.add(User(
+                email="admin@stockpulse.dev",
+                password_hash=hash_password("Admin123"),
+                display_name="Admin",
+                role="admin",
+            ))
+            await _session.commit()
+            logger.info("Default admin seeded: admin@stockpulse.dev")
+
     # Load API keys from provider_configs and start Redis subscriber
     from app.core.api_keys import load_api_keys_from_db, start_subscriber, stop_subscriber
     await load_api_keys_from_db()
@@ -91,7 +111,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await mark_stale_runs_failed()
     from app.core.redis import get_redis
     _r = await get_redis()
-    _stale_locks = await _r.keys("sp:*:lock")
+    _stale_locks: list[str] = []
+    async for _key in _r.scan_iter(match="sp:*:lock", count=100):
+        _stale_locks.append(_key)
     if _stale_locks:
         await _r.delete(*_stale_locks)
         logger.info("Cleared %d stale collection locks from previous run", len(_stale_locks))
@@ -119,6 +141,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await stop_subscriber()
     stop_yf_pool()
     shutdown_executor()
+    from app.core.orm import close_engine
+    await close_engine()
     await close_db_pool()
     await close_redis()
     logger.info("StockPulse shut down")

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # asyncpg pool settings
     DATABASE_POOL_MIN_SIZE: int = 2
-    DATABASE_POOL_MAX_SIZE: int = 10
+    DATABASE_POOL_MAX_SIZE: int = 20
     DATABASE_COMMAND_TIMEOUT: int = 120
 
     # Redis (own instance, DB 0)

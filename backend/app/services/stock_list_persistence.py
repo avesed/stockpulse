@@ -179,7 +179,7 @@ async def _save_to_db(stocks: List[Dict[str, Any]]) -> None:
     )
 
     try:
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=5) as conn:
             for i in range(0, len(stocks), _INSERT_CHUNK_SIZE):
                 chunk = stocks[i : i + _INSERT_CHUNK_SIZE]
                 rows = [

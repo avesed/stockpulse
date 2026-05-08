@@ -11,6 +11,7 @@ API Documentation: https://finnhub.io/docs/api
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -68,6 +69,7 @@ class FinnhubProvider(DataProvider):
     # Client pool: api_key -> finnhub.Client
     _clients: Dict[str, Any] = {}
     _pool_snapshot: list[str] = []
+    _clients_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -87,30 +89,30 @@ class FinnhubProvider(DataProvider):
         if not current_pool:
             return None, None
 
-        # Detect pool changes — rebuild stale clients
-        if current_pool != FinnhubProvider._pool_snapshot:
-            stale = set(FinnhubProvider._clients.keys()) - set(current_pool)
-            for k in stale:
-                FinnhubProvider._clients.pop(k, None)
-            FinnhubProvider._pool_snapshot = list(current_pool)
-
-        # Pick next key via round-robin (skips rate-limited keys)
         key = get_next_api_key("finnhub")
         if not key:
             return None, None
 
-        if key not in FinnhubProvider._clients:
-            try:
-                import finnhub
-                FinnhubProvider._clients[key] = finnhub.Client(api_key=key)
-                logger.info("Finnhub client initialized (pool size: %d)", len(FinnhubProvider._clients))
-            except ImportError:
-                logger.warning("finnhub-python package not installed")
-                return None, None
-            except Exception as e:
-                logger.error("Failed to initialize Finnhub client: %s", e)
-                return None, None
-        return FinnhubProvider._clients[key], key
+        with FinnhubProvider._clients_lock:
+            # Detect pool changes — rebuild stale clients
+            if current_pool != FinnhubProvider._pool_snapshot:
+                stale = set(FinnhubProvider._clients.keys()) - set(current_pool)
+                for k in stale:
+                    FinnhubProvider._clients.pop(k, None)
+                FinnhubProvider._pool_snapshot = list(current_pool)
+
+            if key not in FinnhubProvider._clients:
+                try:
+                    import finnhub
+                    FinnhubProvider._clients[key] = finnhub.Client(api_key=key)
+                    logger.info("Finnhub client initialized (pool size: %d)", len(FinnhubProvider._clients))
+                except ImportError:
+                    logger.warning("finnhub-python package not installed")
+                    return None, None
+                except Exception as e:
+                    logger.error("Failed to initialize Finnhub client: %s", e)
+                    return None, None
+            return FinnhubProvider._clients[key], key
 
     async def get_quote(
         self, symbol: str, market: str

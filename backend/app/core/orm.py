@@ -49,6 +49,14 @@ def get_session_factory():
     return _session_factory
 
 
+async def close_engine() -> None:
+    global _engine, _session_factory
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+        _session_factory = None
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency for database sessions."""
     factory = get_session_factory()

@@ -152,6 +152,31 @@ class ConnectionManager:
         except Exception:
             return False
 
+    async def _cleanup_dead(self, dead: list[str]) -> None:
+        """Batch-disconnect dead sessions under the lock."""
+        if not dead:
+            return
+        async with self._lock:
+            for sid in dead:
+                self._connections.pop(sid, None)
+                self._session_meta.pop(sid, None)
+                self._collector_status_subs.discard(sid)
+                empty_symbols = []
+                for symbol, sids in self._symbol_subs.items():
+                    sids.discard(sid)
+                    if not sids:
+                        empty_symbols.append(symbol)
+                for symbol in empty_symbols:
+                    del self._symbol_subs[symbol]
+                empty_markets = []
+                for market, sids in self._collection_subs.items():
+                    sids.discard(sid)
+                    if not sids:
+                        empty_markets.append(market)
+                for market in empty_markets:
+                    del self._collection_subs[market]
+                logger.info("WS disconnected: session=%s", sid)
+
     async def broadcast_to_symbol(self, symbol: str, event: dict[str, Any]) -> None:
         """Send an event to all sessions subscribed to a symbol.
 
@@ -161,47 +186,48 @@ class ConnectionManager:
         (unified ``/ws/data``) receive all events.
         """
         sym_upper = symbol.upper()
-        sids = self._symbol_subs.get(sym_upper)
+        async with self._lock:
+            sids = list(self._symbol_subs.get(sym_upper, ()))
+            meta_snapshot = {sid: self._session_meta.get(sid, {}) for sid in sids}
         if not sids:
             return
         event_source = event.get("source", "")
         data = serialize_event(event)
         dead: list[str] = []
-        for sid in list(sids):
-            meta = self._session_meta.get(sid, {})
-            pf = meta.get("provider_filter")
+        for sid in sids:
+            pf = meta_snapshot[sid].get("provider_filter")
             if pf and pf != event_source:
                 continue
             if not await self._send_to(sid, data):
                 dead.append(sid)
-        for sid in dead:
-            await self.disconnect(sid)
+        await self._cleanup_dead(dead)
 
     async def broadcast_collection_progress(self, market: str, event: dict[str, Any]) -> None:
         """Send collection progress to all sessions subscribed to a market."""
         m_lower = market.lower()
-        sids = self._collection_subs.get(m_lower)
+        async with self._lock:
+            sids = list(self._collection_subs.get(m_lower, ()))
         if not sids:
             return
         data = serialize_event(event)
         dead: list[str] = []
-        for sid in list(sids):
+        for sid in sids:
             if not await self._send_to(sid, data):
                 dead.append(sid)
-        for sid in dead:
-            await self.disconnect(sid)
+        await self._cleanup_dead(dead)
 
     async def broadcast_collector_status(self, event: dict[str, Any]) -> None:
         """Send collector status to all subscribers."""
-        if not self._collector_status_subs:
+        async with self._lock:
+            sids = list(self._collector_status_subs)
+        if not sids:
             return
         data = serialize_event(event)
         dead: list[str] = []
-        for sid in list(self._collector_status_subs):
+        for sid in sids:
             if not await self._send_to(sid, data):
                 dead.append(sid)
-        for sid in dead:
-            await self.disconnect(sid)
+        await self._cleanup_dead(dead)
 
     async def send_to_session(self, session_id: str, event: dict[str, Any]) -> bool:
         """Send event to a specific session."""

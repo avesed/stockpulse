@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
+
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -156,9 +156,7 @@ async def _run_job(
         prov_concurrency = 1
 
     if prov_proxy:
-        os.environ["HTTPS_PROXY"] = prov_proxy
-        os.environ["HTTP_PROXY"] = prov_proxy
-        logger.info("[ml_%s/%s] proxy set: %s", job_type, market, prov_proxy)
+        logger.info("[ml_%s/%s] proxy configured: %s (applied via yf process pool)", job_type, market, prov_proxy)
 
     # When proxy is configured with concurrency > 1, override conservative defaults
     if prov_proxy and prov_concurrency > 1:

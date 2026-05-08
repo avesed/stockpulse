@@ -42,7 +42,7 @@ async def get_dashboard_stats(admin: User = Depends(require_admin)):
     pool = get_db_pool()
 
     # Query DB for aggregates
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=5) as conn:
         bar_count = await conn.fetchval("SELECT count(*) FROM stock_daily_bars") or 0
         symbol_count = await conn.fetchval("SELECT count(*) FROM stock_symbols") or 0
         consumer_count = await conn.fetchval(
@@ -133,7 +133,7 @@ async def get_request_stats(
 async def get_provider_stats(admin: User = Depends(require_admin)):
     """Get provider health overview."""
     pool = get_db_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=5) as conn:
         rows = await conn.fetch(
             "SELECT provider_name, display_name, is_enabled, health_status, "
             "last_health_check, error_message "

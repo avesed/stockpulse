@@ -27,6 +27,8 @@ COPY --from=frontend-builder /build/dist /usr/share/nginx/html
 
 # Copy Docker config
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+RUN mkdir -p /etc/nginx/snippets
+COPY docker/nginx-security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY docker/supervisord.conf /etc/supervisor/conf.d/stockpulse.conf
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/seed-data.sh /usr/local/bin/seed-data.sh

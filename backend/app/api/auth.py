@@ -25,7 +25,6 @@ from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
     RefreshRequest,
-    RegisterRequest,
     TokenResponse,
     UserResponse,
 )
@@ -40,35 +39,6 @@ def _issue_tokens(user: User) -> TokenResponse:
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),
     )
-
-
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(User).where(User.email == body.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # Bootstrap: first user becomes admin
-    settings = get_settings()
-    role = "user"
-    admin_exists = (
-        await db.execute(select(User.id).where(User.role == "admin").limit(1))
-    ).first()
-    if not admin_exists:
-        if not settings.FIRST_ADMIN_EMAIL or body.email == settings.FIRST_ADMIN_EMAIL:
-            role = "admin"
-
-    user = User(
-        email=body.email,
-        password_hash=hash_password(body.password),
-        display_name=body.display_name,
-        role=role,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-
-    return _issue_tokens(user)
 
 
 @router.post("/login", response_model=TokenResponse)

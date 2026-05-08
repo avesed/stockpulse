@@ -98,7 +98,7 @@ async def upsert_bars(
         # len(rows) as an upper bound (actual inserts may be fewer due
         # to ON CONFLICT DO UPDATE).  Wrap in an explicit transaction
         # so the batch is atomic.
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=5) as conn:
             async with conn.transaction():
                 await conn.executemany(sql, rows)
             total_inserted += len(rows)

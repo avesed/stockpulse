@@ -52,7 +52,7 @@ async def get_health_summary() -> ApiResponse[HealthSummary]:
     pool = None
     try:
         pool = await get_db_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=5) as conn:
             await conn.execute("SELECT 1")
     except Exception as e:
         db_ok = "down"
@@ -83,7 +83,7 @@ async def get_health_summary() -> ApiResponse[HealthSummary]:
 
     if cached is None and db_ok == "ok" and pool is not None:
         try:
-            async with pool.acquire() as conn:
+            async with pool.acquire(timeout=5) as conn:
                 provider_rows = await conn.fetch(
                     """
                     SELECT provider_name, is_enabled,
