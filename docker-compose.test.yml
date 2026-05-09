@@ -1,0 +1,29 @@
+# Test infrastructure — only postgres + redis, no app container.
+# Used in CI; locally the dev compose services (ports 5433/6380) work fine.
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: stockpulse
+      POSTGRES_PASSWORD: stockpulse
+      POSTGRES_DB: stockpulse
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockpulse"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
